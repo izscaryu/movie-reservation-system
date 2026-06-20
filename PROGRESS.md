@@ -7,7 +7,7 @@ Spec: `movie-reservation-system-guide.md`.
 |-------|-------|--------|
 | 0 | Project Scaffolding & Environment | ✅ Done |
 | 1 | Data Model & Migrations | ✅ Done |
-| 2 | Authentication & Authorization | ⬜ Not started |
+| 2 | Authentication & Authorization | ✅ Done |
 | 3 | Movie Management | ⬜ Not started |
 | 4 | Showtime & Seat Setup | ⬜ Not started |
 | 5 | Reservation Flow (core) | ⬜ Not started |
@@ -54,3 +54,34 @@ Spec: `movie-reservation-system-guide.md`.
 - **No SQL seed migrations** — all seeding is via Java `CommandLineRunner`.
 - **Verified:** `V1` applies, Hibernate `validate` passes (entities match schema), admin row exists,
   `./mvnw test` green.
+
+## Phase 2 — notes / decisions
+
+- **JWT lib:** JJWT 0.12.6 (`jjwt-api` + runtime `jjwt-impl`/`jjwt-jackson`). HS256.
+- **Token claims:** `sub` = user id, plus `email` and `role`; `iat`/`exp`. Secret from
+  `JWT_SECRET` (dev-only insecure default in `application.yml`, must override in prod; ≥32 bytes
+  for HS256). Lifetime from `JWT_EXPIRATION_MS` (default 1h).
+- **Stateless principal (intentional trade-off):** `JwtAuthenticationFilter` rebuilds
+  `UserPrincipal` straight from the token claims on every request — **no DB lookup**. Consequence:
+  a role change (e.g. `/promote`) does **not** affect an already-issued token; the user must
+  **re-login** (or wait for expiry) to get a token carrying the new role. This is accepted standard
+  JWT behavior, chosen for true statelessness. To make promotions take effect immediately we'd
+  switch the filter to a per-request DB load — deliberately not doing that.
+- **Login auth:** Spring Security auto-configures a `DaoAuthenticationProvider` from the
+  `UserDetailsServiceImpl` (loads by email) + `BCryptPasswordEncoder` beans; `AuthService.login`
+  calls the global `AuthenticationManager`. No explicit provider bean (an earlier redundant
+  `@Bean DaoAuthenticationProvider` was removed — it triggered a "UserDetailsService beans will
+  not be used…" WARN and the `.authenticationProvider()` call on HttpSecurity was dead code, since
+  login goes through the global manager). `UserPrincipal` carries the user id for Phase 5 ownership.
+- **Signup:** `POST /api/auth/signup` returns **201 with no token** (role always USER); login is a
+  separate call. `POST /api/auth/login` returns `{token, tokenType:"Bearer", expiresInMs}`.
+- **Endpoint tiers:** public = `POST /api/auth/**` and `GET /api/movies/**`, `GET /api/showtimes/**`;
+  admin-only = `/api/admin/**` (`hasRole("ADMIN")`); everything else authenticated. Stateless
+  session, CSRF disabled. 401 via `RestAuthenticationEntryPoint`, 403 via `RestAccessDeniedHandler`.
+- **Promote:** `POST /api/admin/users/{id}/promote` (admin-only) sets role ADMIN, 404 if missing.
+- **Exception handling:** minimal `GlobalExceptionHandler` (`@RestControllerAdvice`) for validation
+  (400), email-taken (409), bad credentials (401), not-found (404). Full version is Phase 7.
+- **Resolved WARN:** the "Global AuthenticationManager configured with an AuthenticationProvider
+  bean…" message was removed by deleting the redundant provider bean (see Login auth above).
+- **Verified:** integration test (`AuthIntegrationTest`) covers all four cases —
+  signup→login→token, no-token→401, USER token on `/api/admin/**`→403, ADMIN token→200. All green.
