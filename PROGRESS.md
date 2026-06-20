@@ -8,7 +8,7 @@ Spec: `movie-reservation-system-guide.md`.
 | 0 | Project Scaffolding & Environment | ✅ Done |
 | 1 | Data Model & Migrations | ✅ Done |
 | 2 | Authentication & Authorization | ✅ Done |
-| 3 | Movie Management | ⬜ Not started |
+| 3 | Movie Management | ✅ Done |
 | 4 | Showtime & Seat Setup | ⬜ Not started |
 | 5 | Reservation Flow (core) | ⬜ Not started |
 | 6 | Admin Reporting | ⬜ Not started |
@@ -85,3 +85,40 @@ Spec: `movie-reservation-system-guide.md`.
   bean…" message was removed by deleting the redundant provider bean (see Login auth above).
 - **Verified:** integration test (`AuthIntegrationTest`) covers all four cases —
   signup→login→token, no-token→401, USER token on `/api/admin/**`→403, ADMIN token→200. All green.
+
+## Phase 3 — notes / decisions
+
+- **Endpoints:** admin (ADMIN-only via the existing `/api/admin/**` tier): `POST /api/admin/movies`
+  → 201, `PUT /api/admin/movies/{id}` → 200, `DELETE /api/admin/movies/{id}` → 204. Public (the
+  existing `GET /api/movies/**` permitAll tier): `GET /api/movies?genre=...` and
+  `GET /api/movies/{id}`. **No `SecurityConfig` change needed** — Phase 2 tiers already cover both
+  path prefixes (public reads under `/api/movies`, admin writes under `/api/admin/movies`).
+- **DTOs (entity never exposed):** `dto/movie/MovieRequest` — validated `title` @NotBlank
+  @Size(255), `durationMinutes` @NotNull @Positive, `description` ≤5000, `posterUrl` ≤512, each
+  genre name @NotBlank @Size(100). `MovieResponse` returns `genres` as a **sorted (case-insensitive)
+  list of names**. The service maps entity→DTO inside the open transaction (genres always
+  initialised), so controllers only ever see DTOs.
+- **Genre = NAMES, get-or-create (confirmed design):** `MovieService.resolveGenres` dedups within a
+  request by lowercased+trimmed name, then `findByNameIgnoreCase` else insert. First-seen casing is
+  the stored casing; `"Action"`/`"action"` resolve to one row. No separate Genre admin API. Unused
+  `GenreRepository.findByName` was replaced by `findByNameIgnoreCase` (nothing referenced it).
+- **Soft delete (confirmed design):** `V2__add_movie_soft_delete.sql` adds nullable
+  `deleted_at DATETIME(6)` (+ `idx_movies_deleted_at`) to `movies`; matching `Movie.deletedAt` field
+  keeps `ddl-auto=validate` happy. DELETE stamps `now()` → 204. **PUT/DELETE on an already
+  soft-deleted movie → 404** (both look up via `findByIdAndDeletedAtIsNull`, so a deleted row is
+  never silently re-edited/re-deleted). Every public read filters `deleted_at IS NULL`. Existing
+  showtimes/reservations keep referencing the row.
+- **Migration version:** the next free Flyway version was **V2** — the Phase 1 admin seed was a Java
+  `CommandLineRunner`, not a SQL migration, so the spec's `V2__seed_admin.sql` was never consumed.
+- **N+1 + genre-filter truncation (the tricky bit):** single fetch `findByIdAndDeletedAtIsNull` uses
+  `@EntityGraph("genres")`. List queries use JPQL `SELECT DISTINCT m … LEFT JOIN FETCH m.genres …
+  ORDER BY m.title` rather than a derived `@EntityGraph` list method — a to-many `@EntityGraph` list
+  returns duplicate roots and cannot carry `DISTINCT` or the explicit `ORDER BY title`. The genre
+  filter is **two-step**: `findIdsByGenreName` (case-insensitive) finds matching movie IDs, then
+  `findByIdsWithGenres` fetches those IDs with their **full** genre set (no genre predicate in the
+  fetch, so the collection is never truncated). Empty match short-circuits to avoid an `IN ()` query.
+- **Verified:** `MovieIntegrationTest` (7 tests, MockMvc, real MySQL) — create→sorted genres; genre
+  filter returns each movie's **full** genre set (the truncation guard); case-insensitive
+  get-or-create reuse; update replaces fields+genres; soft-delete hides from single+list reads and a
+  2nd delete/update → 404; USER→403 / no-token→401; validation (blank title, null/zero duration) →
+  400. Full suite green: **12 tests, 0 failures**.
