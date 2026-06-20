@@ -6,5 +6,7 @@ import org.springframework.data.jpa.repository.JpaRepository;
 
 public interface GenreRepository extends JpaRepository<Genre, Long> {
 
-    Optional<Genre> findByName(String name);
+    // Case-insensitive lookup backs the get-or-create in MovieService, so
+    // "Action"/"action" resolve to one genre row.
+    Optional<Genre> findByNameIgnoreCase(String name);
 }

@@ -51,4 +51,10 @@ public class Movie {
     @CreationTimestamp
     @Column(name = "created_at", nullable = false, updatable = false)
     private LocalDateTime createdAt;
+
+    // Soft-delete marker (Phase 3). NULL = active; non-null = deleted. Public
+    // reads filter on deleted_at IS NULL. Must agree with the V2 column or the
+    // app fails to boot under ddl-auto=validate.
+    @Column(name = "deleted_at")
+    private LocalDateTime deletedAt;
 }
