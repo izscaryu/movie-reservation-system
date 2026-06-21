@@ -10,7 +10,7 @@ Spec: `movie-reservation-system-guide.md`.
 | 2 | Authentication & Authorization | ✅ Done |
 | 3 | Movie Management | ✅ Done |
 | 4 | Showtime & Seat Setup | ✅ Done |
-| 5 | Reservation Flow (core) | ⬜ Not started |
+| 5 | Reservation Flow (core) | ✅ Done |
 | 6 | Admin Reporting | ⬜ Not started |
 | 7 | Polish & Cross-Cutting Concerns | ⬜ Not started |
 | 8 | Testing | ⬜ Not started |
@@ -179,3 +179,74 @@ Spec: `movie-reservation-system-guide.md`.
   create → 404; public reads work with no token and hide a soft-deleted movie (404); USER → 403 /
   no-token → 401; validation (missing movieId/startTime, non-positive price, past start) → 400. Full
   suite green: **19 tests, 0 failures**.
+
+## Phase 5 — notes / decisions
+
+- **No new DDL (no V3).** `reservations` + `reservation_seats` (with FKs, `idx_reservations_user`,
+  `idx_reservations_status_expires (status, expires_at)`, and the `UNIQUE(showtime_seat_id)`
+  overbooking safety net) already existed in `V1`. The `@Version` on `showtime_seats` is finally used.
+- **No `SecurityConfig` change.** `/api/reservations/**` matches no public/admin matcher, so it falls
+  under `.anyRequest().authenticated()` → any logged-in role; no token → 401. Every action is
+  **owner-scoped in the service** by the principal's user id (not by the URL).
+- **Needed addition:** `@EnableScheduling` on the app class — it was absent, so without it the
+  `@Scheduled` expiry job is created but never fires.
+- **Concurrency = optimistic locking (confirmed, the headline decision).** Hold reads each
+  `ShowtimeSeat`, checks `AVAILABLE`, sets `HELD`; the versioned `UPDATE … WHERE version=?` makes the
+  loser of a race match 0 rows → 409. Three layers: (a) the status read rejects the common
+  already-taken case (with the offending seat labels); (b) `@Version` catches the true read-both race;
+  (c) `UNIQUE(showtime_seat_id)` is the last-resort backstop. Chosen over pessimistic
+  (`SELECT … FOR UPDATE`) — no held DB locks, better under the low contention that's realistic, and
+  the spec's recommended option.
+- **THE deadlock fix (subtle, important).** Hibernate flushes **INSERTs before UPDATEs** within a
+  flush, so naively the `reservation_seats` INSERT took the unique-key lock *before* the
+  `showtime_seats` versioned UPDATE — two concurrent holds then grabbed locks in opposite orders and
+  MySQL killed one with a **`Deadlock found`** (surfaced as 500, not 409). Fix: in `hold()`, set seats
+  `HELD` and **`entityManager.flush()` BEFORE** creating the reservation/links, so every hold takes
+  the seat row lock first (one consistent order). The loser now blocks then gets a clean
+  `OptimisticLockException` → 409. Also note `flush()` throws the **native**
+  `jakarta.persistence.OptimisticLockException`, not Spring's translated type (manual flush bypasses
+  Spring's `@Repository`/commit translation) — caught explicitly in the service; the handler maps the
+  native + Spring optimistic, `DataIntegrityViolationException`, and `CannotAcquireLockException` all
+  to 409 as backstops.
+- **Atomic multi-seat holds.** Whole hold is one `@Transactional`; any failure rolls back every
+  tentative `HELD` — a partial hold can never leak. (Test: A holds {s1,s2,s3}; B's {s3,s4,s5} → 409
+  and s4,s5 stay AVAILABLE.)
+- **Seat ↔ showtime validation + dedup.** Requested ids are de-duplicated, then loaded
+  `WHERE showtime_id=? AND id IN (?)`; if fewer come back than distinct requested, an unknown /
+  cross-showtime id was posted → **400**.
+- **State machine.** Seats `AVAILABLE→HELD→BOOKED`, back to `AVAILABLE` on expiry/cancel. Reservations
+  `PENDING→{CONFIRMED, EXPIRED, CANCELLED}`, `CONFIRMED→CANCELLED`. Releasing a seat flips the
+  `ShowtimeSeat` to AVAILABLE (managed update, version-guarded) **and deletes the `reservation_seats`
+  link** (frees the unique key so the seat can be re-held). `expiresAt` is nulled on leaving PENDING
+  (per the entity contract).
+- **Reservation-level transitions are guarded conditional updates.** `compareAndSetStatus(id, from,
+  to)` = `UPDATE … WHERE id=? AND status=:from`, checking rows-affected. This is the serialization
+  point for **confirm-vs-expire**: the row lock means exactly one of the two sees 1 row (wins) and the
+  other sees 0 → 409. Avoids needing a `@Version` column on `Reservation` (so no DDL). Confirm's
+  `HELD→BOOKED` seat flip is a *managed* update (not bulk JPQL), so `@Version` guards it too — the
+  exact-instant race resolves at the seat level as well.
+- **Expiry job — the Spring proxy gotcha (folded in).** `ReservationExpiryJob` is a **separate bean**;
+  it calls `reservationService.expireOne(id)` per overdue hold, **crossing the bean boundary** so each
+  gets its own `@Transactional`. A `this.expireOne(...)` loop inside the service would be
+  self-invocation and bypass the proxy (the per-reservation transaction would silently not apply).
+  `expireOne` is idempotent (guarded update no-ops if already non-PENDING). `runOnce()` is exposed so
+  the test drives one sweep deterministically. Cadence: `@Scheduled(fixedRate = 60000)`; hold window
+  10 min (`app.reservation.hold-minutes`).
+- **Decided codes (confirmed):** acting on someone else's reservation → **404** (don't reveal the id
+  exists); confirm-after-expiry / double-confirm / cancel-after-start → **409**; cross-showtime seat →
+  **400**. Extra guards: holding a soft-deleted movie's showtime → **404**, an already-started showtime
+  → **409**.
+- **KNOWN LIMITATION (carried, not new):** the showtime overlap check is still read-then-write (admin
+  scale). Unrelated to the reservation concurrency, which is fully guarded above.
+- **Endpoints:** `POST /api/reservations` (hold → 201 PENDING + expiresAt), `POST
+  /api/reservations/{id}/confirm` (→ 200 CONFIRMED), `GET /api/reservations/me?filter=upcoming|past`,
+  `DELETE /api/reservations/{id}` (→ 204). DTOs only; request takes **`showtimeSeatIds`** (the ids the
+  seat map exposes).
+- **Test isolation:** integration tests use real MySQL and are **not** `@Transactional` (the race must
+  commit for real). Showtime start times now carry a large **random** far-future offset so showtimes
+  never collide (same room/minute) across test classes or repeated runs in the shared DB — this also
+  hardened the Phase 4 `ShowtimeIntegrationTest` start times.
+- **Verified:** `ReservationIntegrationTest` (9 tests incl. the concurrency test, re-run 3× to rule
+  out flakiness) — happy path, already-held → 409, multi-seat atomicity, expiry, confirm-after-expiry
+  → 409, someone-else's → 404, cross-showtime → 400, no-token → 401, validation → 400. Full suite
+  green: **28 tests, 0 failures**.
