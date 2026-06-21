@@ -9,7 +9,7 @@ Spec: `movie-reservation-system-guide.md`.
 | 1 | Data Model & Migrations | ✅ Done |
 | 2 | Authentication & Authorization | ✅ Done |
 | 3 | Movie Management | ✅ Done |
-| 4 | Showtime & Seat Setup | ⬜ Not started |
+| 4 | Showtime & Seat Setup | ✅ Done |
 | 5 | Reservation Flow (core) | ⬜ Not started |
 | 6 | Admin Reporting | ⬜ Not started |
 | 7 | Polish & Cross-Cutting Concerns | ⬜ Not started |
@@ -122,3 +122,60 @@ Spec: `movie-reservation-system-guide.md`.
   get-or-create reuse; update replaces fields+genres; soft-delete hides from single+list reads and a
   2nd delete/update → 404; USER→403 / no-token→401; validation (blank title, null/zero duration) →
   400. Full suite green: **12 tests, 0 failures**.
+
+## Phase 4 — notes / decisions
+
+- **No new DDL (no V3).** All Phase 4 tables already existed in `V1__init_schema.sql`:
+  `theater_rooms`, `seats`, `showtimes` (incl. **`end_time NOT NULL`**), `showtime_seats` (incl. the
+  **`@Version`** column). So `endTime` being a stored column was effectively pre-decided by the
+  schema; Phase 4 adds no migration, only Java.
+- **Room/Seat model (confirmed design):** kept **configurable** rooms (`num_rows × seats_per_row`),
+  seats generated from those dimensions. Seeded via a Java **`RoomSeatInitializer` CommandLineRunner**
+  (consistent with `AdminUserInitializer`; the project seeds in Java, not SQL). **Idempotent per room
+  by name** — each room is seeded only if absent, so adding a room later seeds just that one. Seeds 3
+  rooms: **Room 1 = 5×8 (40 seats), Room 2 = 8×10 (80), Room 3 = 6×9 (54)**. Row labels A, B, C…;
+  seat label = `rowLabel + seatNumber` (e.g. `A5`).
+- **endTime (confirmed design):** **stored**, computed server-side at creation as
+  `startTime + movie.durationMinutes` (client never sends it). Two reasons: the overlap check does
+  interval math in SQL so `end_time` must be a real column; and storing it **snapshots** the duration
+  — later editing a movie's `durationMinutes` does not retroactively shift already-scheduled showtimes.
+- **Auto seat-map generation (THE key step):** `POST /api/admin/showtimes` creates the showtime and,
+  in the **same `@Transactional`**, inserts one `ShowtimeSeat` (status `AVAILABLE`) per `Seat` in the
+  room. The single transaction makes it **atomic** — if seat generation fails the showtime insert
+  rolls back too, so a showtime can never exist with a missing/partial seat map. `@Version` rows are
+  populated now (value 0) but unused until Phase 5's reservation/concurrency flow.
+- **Overlap validation:** rejected with **409 Conflict** (`ShowtimeConflictException` → new handler).
+  Uses interval logic `existing.startTime < newEnd AND existing.endTime > newStart` (derived query
+  `existsByTheaterRoom_IdAndStartTimeLessThanAndEndTimeGreaterThan`), **not** start-time equality.
+  Strict `<` / `>` means **back-to-back showtimes are allowed** (one ending exactly as the next starts
+  is not an overlap); a test pins this boundary (touching = 201, 1 min into the window = 409).
+- **KNOWN LIMITATION (concurrency):** the overlap check is **read-then-write**, so two simultaneous
+  admin creates could both pass it and double-book a room — same class of race as the Phase 3 genre
+  get-or-create. **Accepted at admin scale**, not engineered around. If it ever mattered: a DB-level
+  guard (MySQL has no exclusion constraint, so a locking/serialized check) would be the fix.
+- **Soft-deleted movie (confirmed design):**
+  - **Create** a showtime for a soft-deleted/missing movie → **404** (looked up via
+    `findByIdAndDeletedAtIsNull`).
+  - **Public reads hide them:** `GET /api/movies/{movieId}/showtimes` for a deleted/missing movie →
+    404; `GET /api/showtimes/{id}/seats` whose movie is soft-deleted → 404. Consistent with Phase 3
+    (every public movie read filters `deleted_at IS NULL`). Showtime rows stay in the DB (integrity
+    for past reservations); they are just not surfaced publicly.
+- **Endpoints:** admin (`/api/admin/**` tier): `POST /api/admin/showtimes` → 201. Public
+  (already-permitAll GET tiers): `GET /api/movies/{movieId}/showtimes?date=YYYY-MM-DD` (date optional;
+  omitted = all) under `/api/movies/**`, and `GET /api/showtimes/{id}/seats` (seat map) under
+  `/api/showtimes/**`. **No `SecurityConfig` change** — both prefixes were opened for GET back in
+  **Phase 2** (not Phase 3), so `/api/showtimes/**` was already public.
+- **DTOs (entity never exposed):** `ShowtimeRequest` (`movieId`/`theaterRoomId` @NotNull,
+  `startTime` @NotNull @Future, `price` @NotNull @Positive — no `endTime`), `ShowtimeResponse`,
+  `SeatMapResponse` + `SeatMapEntry` (exposes **`showtimeSeatId`** — the id Phase 5 will lock — not
+  the physical seat id). Repository fetches `JOIN FETCH` movie/room/seat to avoid N+1 when mapping.
+- **Tooling note (not a code bug):** Spring does **not** read `.env` (only docker-compose does).
+  Running `./mvnw test` from a bare shell fell back to the `application.yml` default `DB_PORT:3306`
+  (the native MySQL80 service, which has no `movieuser`) → `Access denied`. Fix: export `.env` into
+  the shell (or use the IDE run config) so `DB_PORT=3307` (Docker MySQL) is used.
+- **Verified:** `ShowtimeIntegrationTest` (7 tests, MockMvc, real MySQL) — auto-gen seat count ==
+  room dims (Room 2 = **80 seats**) and all `AVAILABLE`; overlap same room → 409, non-overlap /
+  different room → 201; back-to-back boundary (touching 201 / overlapping 409); soft-deleted movie
+  create → 404; public reads work with no token and hide a soft-deleted movie (404); USER → 403 /
+  no-token → 401; validation (missing movieId/startTime, non-positive price, past start) → 400. Full
+  suite green: **19 tests, 0 failures**.
