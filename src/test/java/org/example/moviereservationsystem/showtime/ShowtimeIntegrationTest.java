@@ -191,8 +191,12 @@ class ShowtimeIntegrationTest {
     // --- helpers ---
 
     private LocalDateTime futureSlot() {
-        // Far future + minute precision so each run's window is isolated.
-        return LocalDateTime.now().plusYears(1).withSecond(0).withNano(0);
+        // Far future, minute precision, plus a large random offset so a showtime
+        // never collides (same room, same minute) with another test class or a
+        // previous run in the shared DB. Each test calls this once and derives
+        // its relative offsets from the returned value.
+        return LocalDateTime.now().plusYears(1).withSecond(0).withNano(0)
+                .plusMinutes(java.util.concurrent.ThreadLocalRandom.current().nextLong(0, 5_000_000));
     }
 
     private TheaterRoom room(String name) {
