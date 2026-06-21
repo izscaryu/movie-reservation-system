@@ -1,12 +1,16 @@
 package org.example.moviereservationsystem.exception;
 
+import jakarta.persistence.OptimisticLockException;
 import jakarta.servlet.http.HttpServletRequest;
 import java.time.LocalDateTime;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.stream.Collectors;
+import org.springframework.dao.CannotAcquireLockException;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
+import org.springframework.orm.ObjectOptimisticLockingFailureException;
 import org.springframework.security.authentication.BadCredentialsException;
 import org.springframework.validation.FieldError;
 import org.springframework.web.bind.MethodArgumentNotValidException;
@@ -47,10 +51,39 @@ public class GlobalExceptionHandler {
         return build(HttpStatus.NOT_FOUND, ex.getMessage(), request);
     }
 
+    @ExceptionHandler(BadRequestException.class)
+    public ResponseEntity<Map<String, Object>> handleBadRequest(
+            BadRequestException ex, HttpServletRequest request) {
+        return build(HttpStatus.BAD_REQUEST, ex.getMessage(), request);
+    }
+
     @ExceptionHandler(ShowtimeConflictException.class)
     public ResponseEntity<Map<String, Object>> handleShowtimeConflict(
             ShowtimeConflictException ex, HttpServletRequest request) {
         return build(HttpStatus.CONFLICT, ex.getMessage(), request);
+    }
+
+    @ExceptionHandler({SeatsUnavailableException.class, ReservationStateException.class})
+    public ResponseEntity<Map<String, Object>> handleReservationConflict(
+            RuntimeException ex, HttpServletRequest request) {
+        return build(HttpStatus.CONFLICT, ex.getMessage(), request);
+    }
+
+    /**
+     * Backstops for the overbooking race that bypass the explicit checks: the
+     * @Version optimistic-lock failure when two transactions both flip the same
+     * seat, the UNIQUE(showtime_seat_id) violation if even that slips through,
+     * and a DB row-lock deadlock under heavy contention. All mean the seat was
+     * taken concurrently -> 409, so the loser retries rather than seeing a 500.
+     */
+    @ExceptionHandler({
+            ObjectOptimisticLockingFailureException.class,
+            OptimisticLockException.class,
+            DataIntegrityViolationException.class,
+            CannotAcquireLockException.class})
+    public ResponseEntity<Map<String, Object>> handleConcurrentSeatConflict(
+            RuntimeException ex, HttpServletRequest request) {
+        return build(HttpStatus.CONFLICT, "One or more seats were just taken; please refresh", request);
     }
 
     private String formatFieldError(FieldError error) {
