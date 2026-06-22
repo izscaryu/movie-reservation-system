@@ -2,6 +2,7 @@ package org.example.moviereservationsystem.repository;
 
 import java.util.Collection;
 import java.util.List;
+import org.example.moviereservationsystem.entity.SeatStatus;
 import org.example.moviereservationsystem.entity.ShowtimeSeat;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Query;
@@ -24,4 +25,11 @@ public interface ShowtimeSeatRepository extends JpaRepository<ShowtimeSeat, Long
             + "WHERE ss.showtime.id = :showtimeId AND ss.id IN :ids ORDER BY ss.id")
     List<ShowtimeSeat> findByShowtimeIdAndIdInWithSeat(
             @Param("showtimeId") Long showtimeId, @Param("ids") Collection<Long> ids);
+
+    // --- Phase 6 reporting (occupancy) ---
+    // Both ride idx_showtime_seats_showtime (showtime_id). Occupancy =
+    // countBooked / countTotal, computed in the service as a percentage.
+    long countByShowtime_Id(Long showtimeId);
+
+    long countByShowtime_IdAndStatus(Long showtimeId, SeatStatus status);
 }

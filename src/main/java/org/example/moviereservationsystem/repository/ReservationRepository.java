@@ -1,9 +1,11 @@
 package org.example.moviereservationsystem.repository;
 
+import java.math.BigDecimal;
 import java.time.LocalDateTime;
 import java.util.Collection;
 import java.util.List;
 import java.util.Optional;
+import org.example.moviereservationsystem.dto.report.MovieRevenue;
 import org.example.moviereservationsystem.entity.Reservation;
 import org.example.moviereservationsystem.entity.ReservationStatus;
 import org.springframework.data.jpa.repository.JpaRepository;
@@ -56,4 +58,45 @@ public interface ReservationRepository extends JpaRepository<Reservation, Long> 
             @Param("id") Long id,
             @Param("fromStates") Collection<ReservationStatus> fromStates,
             @Param("to") ReservationStatus to);
+
+    // --- Phase 6 reporting (read-only aggregation, DB-side) ---
+
+    // Total revenue, date-bounded on created_at (the booking instant — see
+    // ReportService for why createdAt is the axis). COALESCE so "no matching
+    // rows" yields 0, not a NULL that would NPE on unboxing. Null from/to leaves
+    // that bound open. Rides idx_reservations_status_created (status, created_at).
+    @Query("SELECT COALESCE(SUM(r.totalPrice), 0) FROM Reservation r "
+            + "WHERE r.status = :status "
+            + "AND (:from IS NULL OR r.createdAt >= :from) "
+            + "AND (:to IS NULL OR r.createdAt < :to)")
+    BigDecimal sumRevenue(
+            @Param("status") ReservationStatus status,
+            @Param("from") LocalDateTime from,
+            @Param("to") LocalDateTime to);
+
+    // Count of matching reservations for the same window (paired with sumRevenue).
+    @Query("SELECT COUNT(r) FROM Reservation r "
+            + "WHERE r.status = :status "
+            + "AND (:from IS NULL OR r.createdAt >= :from) "
+            + "AND (:to IS NULL OR r.createdAt < :to)")
+    long countInRange(
+            @Param("status") ReservationStatus status,
+            @Param("from") LocalDateTime from,
+            @Param("to") LocalDateTime to);
+
+    // Revenue grouped by movie, highest first. Sums r.totalPrice with NO seat
+    // join, so revenue is never multiplied by the seat count. Soft-deleted movies
+    // are INCLUDED (the money was real — historical accounting sees everything).
+    @Query("SELECT new org.example.moviereservationsystem.dto.report.MovieRevenue("
+            + "m.id, m.title, COALESCE(SUM(r.totalPrice), 0)) "
+            + "FROM Reservation r JOIN r.showtime s JOIN s.movie m "
+            + "WHERE r.status = :status "
+            + "AND (:from IS NULL OR r.createdAt >= :from) "
+            + "AND (:to IS NULL OR r.createdAt < :to) "
+            + "GROUP BY m.id, m.title "
+            + "ORDER BY COALESCE(SUM(r.totalPrice), 0) DESC")
+    List<MovieRevenue> revenueByMovie(
+            @Param("status") ReservationStatus status,
+            @Param("from") LocalDateTime from,
+            @Param("to") LocalDateTime to);
 }
