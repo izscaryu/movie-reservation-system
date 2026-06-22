@@ -11,7 +11,7 @@ Spec: `movie-reservation-system-guide.md`.
 | 3 | Movie Management | ✅ Done |
 | 4 | Showtime & Seat Setup | ✅ Done |
 | 5 | Reservation Flow (core) | ✅ Done |
-| 6 | Admin Reporting | ⬜ Not started |
+| 6 | Admin Reporting | ✅ Done |
 | 7 | Polish & Cross-Cutting Concerns | ⬜ Not started |
 | 8 | Testing | ⬜ Not started |
 | 9 | Containerization & Documentation | ⬜ Not started |
@@ -250,3 +250,70 @@ Spec: `movie-reservation-system-guide.md`.
   out flakiness) — happy path, already-held → 409, multi-seat atomicity, expiry, confirm-after-expiry
   → 409, someone-else's → 404, cross-showtime → 400, no-token → 401, validation → 400. Full suite
   green: **28 tests, 0 failures**.
+
+## Phase 6 — notes / decisions
+
+- **Scope: read-only aggregation, no new domain logic.** Three report endpoints under
+  `/api/admin/reports`; revenue/popular are date-bounded, occupancy is per-showtime.
+- **V3 migration (index only).** `V3__add_reservations_status_created_idx.sql` adds
+  `idx_reservations_status_created (status, created_at)`. Revenue + popular both filter
+  `status = CONFIRMED` AND a `created_at` range; the existing `idx_reservations_status_expires
+  (status, expires_at)` only narrows by status (its range is on `expires_at`), so the created_at
+  range couldn't ride it. **Right-shape-for-volume, not a measured win** — invisible at current
+  seed/test data sizes. It **complements, does not replace,** the expiry index (different predicate:
+  PENDING holds past their deadline). Adding an index does **not** affect `ddl-auto=validate`
+  (validate checks tables/columns/types, not indexes), so V3 is a safe additive migration with no
+  entity change.
+- **No `SecurityConfig` change.** `/api/admin/reports/**` matches the existing
+  `/api/admin/**` → `hasRole("ADMIN")` tier (same as admin movie/showtime endpoints). USER → 403,
+  no token → 401. Confirmed by tests.
+- **What counts (the semantic call):** **revenue = `SUM(reservations.total_price)` WHERE
+  `status = CONFIRMED`** only. PENDING/EXPIRED/CANCELLED earn nothing (the `CONFIRMED` filter is
+  explicit in every query). Sums the **stored** `total_price` (snapshot at hold = price × seats), not
+  a recompute from `showtime.price`, so a later price edit can't rewrite history. Seat-level
+  aggregates: EXPIRED/CANCELLED already dropped their `reservation_seats` rows in Phase 5 so they
+  vanish naturally, **but PENDING holds still have rows**, so popular-movies still filters
+  `CONFIRMED` explicitly (can't rely on row-deletion alone).
+- **Revenue date axis = `created_at` (confirmed).** It's the booking instant, not the true
+  confirm/sale instant — which this project does **not** persist. Accepted proxy here; documented in
+  `ReportService` that production would add a `confirmedAt` stamped on confirm and report on that.
+  **Not added now.** Date params are ISO `yyyy-MM-dd`, both **optional**, both **inclusive**:
+  internally `created_at >= from 00:00` and `created_at < (to + 1 day) 00:00` (half-open under the
+  hood, inclusive to the caller). `from > to` → **400** via `BadRequestException`. `popular-movies`
+  `limit` defaults to 10, capped at 100, `< 1` → 400.
+- **DB-side aggregation, never in-Java summation.** JPQL `SUM`/`COUNT`/`GROUP BY`. Grouped results
+  (`MovieRevenue`, `PopularMovie`) use **constructor expressions** with object-typed components
+  (`Long` counts, `BigDecimal` money) so aggregates bind without primitive coercion. Scalar totals
+  use **`COALESCE(SUM(...), 0)`** so the **empty/zero state** ("no reservations yet") returns `0`,
+  never a NULL that would NPE into a 500. Grouped queries return an empty list naturally.
+- **Occupancy:** numerator = `showtime_seats` with `status = BOOKED`; denominator = total
+  `showtime_seats` for the showtime (both ride `idx_showtime_seats_showtime`). HELD (transient holds)
+  are **not** counted. `occupancyRate` = percentage in [0, 100], 2-dp, computed in the service (guards
+  divide-by-zero even though a showtime always auto-generates ≥1 seat). 404 only if the showtime row
+  **genuinely doesn't exist** — **never** because its movie is soft-deleted (an admin report sees
+  everything, same as revenue).
+- **Soft-deleted movies (confirmed policy):** revenue **total**, revenue **by-movie**, and
+  **occupancy** all **include** them (the money was real / admin sees everything — historical view).
+  **popular-movies excludes** them (`deleted_at IS NULL`) — it's a "what to promote now" list. Pinned
+  by a test: a soft-deleted movie still shows its revenue in by-movie but is absent from popular.
+- **DEFERRED to Phase 7 (don't lose):** `GET /api/admin/reservations` (paginated, filterable by
+  date range/status) from the spec's Phase 6 list — it's fundamentally a paginated list, and Phase 7
+  owns pagination across all list endpoints. Likewise the **popular-movies top-N becomes a `Page`**
+  in Phase 7 (today it's `List` + a `Pageable` LIMIT).
+- **Test isolation (the gotcha aggregates expose).** The DB is shared across test classes and runs
+  persist, so **no assertion uses a global absolute total** — another class's CONFIRMED reservations
+  would make that flaky. Each assertion is scoped to data the test owns: the **by-movie slice** for a
+  movie it created, a **before/after delta** on the total, **relative ordering** of its own movies, or
+  a **date window nothing falls in** (revenue/popular over `2000-01-01..02` are genuinely empty since
+  every `created_at` is "now"). Same isolation gap flagged for Phase 7; reporting is where it bites
+  hardest.
+- **Endpoints:** `GET /api/admin/reports/revenue?from&to` → `RevenueReport`; `…/revenue/by-movie
+  ?from&to` → `List<MovieRevenue>` (revenue desc); `…/occupancy?showtimeId` → `OccupancyReport`;
+  `…/popular-movies?from&to&limit` → `List<PopularMovie>` (tickets-sold desc). DTOs only; entities
+  never exposed.
+- **Verified:** `ReportIntegrationTest` (7 tests) — revenue counts CONFIRMED only (PENDING/CANCELLED
+  excluded, owned by-movie slice + delta); occupancy known 2/40 = 5.00% ratio with HELD excluded;
+  occupancy unknown showtime → 404; popular-movies ordering (owned relative) + soft-delete excluded
+  from popular yet included in revenue; zero-data past window → `0`/empty (the NULL-SUM guard);
+  `from > to` and `limit=0` → 400; USER → 403 / no-token → 401. Full suite green: **35 tests, 0
+  failures**.
