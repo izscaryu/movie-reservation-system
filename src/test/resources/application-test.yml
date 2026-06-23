@@ -1,0 +1,9 @@
+# Test profile. Datasource url/username/password are injected at runtime from the
+# Testcontainers MySQL via @DynamicPropertySource (see AbstractIntegrationTest),
+# so they are intentionally not set here. Flyway still owns the schema on the
+# fresh container.
+app:
+  scheduling:
+    # Keep the @Scheduled expiry trigger from firing during the suite. The job
+    # bean and its runOnce() stay available; tests invoke runOnce() deterministically.
+    enabled: false

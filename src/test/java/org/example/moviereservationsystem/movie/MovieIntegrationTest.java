@@ -8,39 +8,18 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import java.util.List;
-import java.util.UUID;
+import org.example.moviereservationsystem.support.AbstractIntegrationTest;
 import org.junit.jupiter.api.Test;
-import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.beans.factory.annotation.Value;
-import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
-import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.http.MediaType;
-import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.MvcResult;
 
 /**
- * Phase 3 acceptance coverage for movie management. Runs against the real
- * (Docker) MySQL like the Phase 2 auth test. Each test uses UUID-suffixed
- * genre names so genre-filtered lists are deterministic regardless of data
- * left by other tests/runs in the shared database.
+ * Phase 3 acceptance coverage for movie management. Each test uses UUID-suffixed
+ * genre names so genre-filtered lists stay deterministic; combined with the
+ * per-test truncate in the base class, results never depend on other tests.
  */
-@SpringBootTest
-@AutoConfigureMockMvc
-class MovieIntegrationTest {
-
-    @Autowired
-    private MockMvc mockMvc;
-
-    @Autowired
-    private ObjectMapper objectMapper;
-
-    @Value("${app.admin.email}")
-    private String adminEmail;
-
-    @Value("${app.admin.password}")
-    private String adminPassword;
+class MovieIntegrationTest extends AbstractIntegrationTest {
 
     @Test
     void adminCreate_returns201_withSortedGenres() throws Exception {
@@ -205,64 +184,11 @@ class MovieIntegrationTest {
                 .andExpect(status().isBadRequest());
     }
 
-    // --- helpers ---
-
-    private String uid() {
-        return UUID.randomUUID().toString().substring(0, 8);
-    }
+    // --- movie-specific helper ---
 
     private List<String> genres(JsonNode movieJson) throws Exception {
         return objectMapper.convertValue(
                 movieJson.get("genres"),
                 objectMapper.getTypeFactory().constructCollectionType(List.class, String.class));
-    }
-
-    private JsonNode read(MvcResult result) throws Exception {
-        return objectMapper.readTree(result.getResponse().getContentAsString());
-    }
-
-    private long createMovie(String adminToken, MovieBody body) throws Exception {
-        MvcResult result = mockMvc.perform(post("/api/admin/movies")
-                        .header("Authorization", "Bearer " + adminToken)
-                        .contentType(MediaType.APPLICATION_JSON)
-                        .content(objectMapper.writeValueAsString(body)))
-                .andExpect(status().isCreated())
-                .andReturn();
-        return read(result).get("id").asLong();
-    }
-
-    private String adminToken() throws Exception {
-        return login(adminEmail, adminPassword);
-    }
-
-    private String userToken() throws Exception {
-        String email = "user-" + UUID.randomUUID() + "@example.com";
-        String body = objectMapper.writeValueAsString(new SignupBody(email, "password123", "User"));
-        mockMvc.perform(post("/api/auth/signup")
-                        .contentType(MediaType.APPLICATION_JSON)
-                        .content(body))
-                .andExpect(status().isCreated());
-        return login(email, "password123");
-    }
-
-    private String login(String email, String password) throws Exception {
-        String body = objectMapper.writeValueAsString(new LoginBody(email, password));
-        MvcResult result = mockMvc.perform(post("/api/auth/login")
-                        .contentType(MediaType.APPLICATION_JSON)
-                        .content(body))
-                .andExpect(status().isOk())
-                .andReturn();
-        return read(result).get("token").asText();
-    }
-
-    private record MovieBody(
-            String title, String description, String posterUrl,
-            Integer durationMinutes, List<String> genres) {
-    }
-
-    private record SignupBody(String email, String password, String name) {
-    }
-
-    private record LoginBody(String email, String password) {
     }
 }

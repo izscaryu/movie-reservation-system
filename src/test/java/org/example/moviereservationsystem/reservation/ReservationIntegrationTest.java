@@ -7,62 +7,37 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
-import java.util.ArrayList;
 import java.util.List;
-import java.util.UUID;
 import java.util.concurrent.Callable;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import org.example.moviereservationsystem.entity.Reservation;
-import org.example.moviereservationsystem.entity.TheaterRoom;
 import org.example.moviereservationsystem.job.ReservationExpiryJob;
 import org.example.moviereservationsystem.repository.ReservationRepository;
-import org.example.moviereservationsystem.repository.TheaterRoomRepository;
+import org.example.moviereservationsystem.support.AbstractIntegrationTest;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.beans.factory.annotation.Value;
-import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
-import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.http.MediaType;
-import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.MvcResult;
 
 /**
- * Phase 5 acceptance coverage for the reservation flow, against the real (Docker)
- * MySQL. These tests are intentionally NOT @Transactional: the overbooking
+ * Phase 5 acceptance coverage for the reservation flow. These tests are
+ * intentionally NOT @Transactional (inherited from the base): the overbooking
  * guarantee depends on real commits racing, so nothing here may roll back behind
- * the scenes. Each showtime gets a unique, well-spaced future start time so
- * same-room overlap never trips showtime creation and runs stay isolated.
+ * the scenes. Per-test isolation comes from the base-class truncate, and each
+ * showtime gets a unique day-spaced start so same-room overlap never trips.
  */
-@SpringBootTest
-@AutoConfigureMockMvc
-class ReservationIntegrationTest {
-
-    @Autowired
-    private MockMvc mockMvc;
-
-    @Autowired
-    private ObjectMapper objectMapper;
-
-    @Autowired
-    private TheaterRoomRepository theaterRoomRepository;
+class ReservationIntegrationTest extends AbstractIntegrationTest {
 
     @Autowired
     private ReservationRepository reservationRepository;
 
     @Autowired
     private ReservationExpiryJob expiryJob;
-
-    @Value("${app.admin.email}")
-    private String adminEmail;
-
-    @Value("${app.admin.password}")
-    private String adminPassword;
 
     @Test
     void happyPath_holdThenConfirm() throws Exception {
@@ -212,7 +187,7 @@ class ReservationIntegrationTest {
                 .andExpect(status().isBadRequest());
     }
 
-    // --- helpers ---
+    // --- reservation-specific helpers ---
 
     private Callable<Integer> racingHold(CountDownLatch start, String token, long showtimeId, Long seat) {
         return () -> {
@@ -230,17 +205,7 @@ class ReservationIntegrationTest {
     private long newShowtime(int durationMinutes, BigDecimal price) throws Exception {
         String admin = adminToken();
         long movieId = createMovie(admin, durationMinutes);
-        long roomId = theaterRoomRepository.findByName("Room 1").orElseThrow().getId();
-        return createShowtime(admin, movieId, roomId, uniqueFutureStart(), price);
-    }
-
-    private LocalDateTime uniqueFutureStart() {
-        // Far future, minute precision, plus a large random offset. Each showtime
-        // here is for its own movie and is never compared in time to another, so a
-        // unique random start is enough to avoid same-room overlap collisions
-        // across tests, classes and repeated runs in the shared DB.
-        return LocalDateTime.now().plusYears(1).withSecond(0).withNano(0)
-                .plusMinutes(java.util.concurrent.ThreadLocalRandom.current().nextLong(0, 5_000_000));
+        return createShowtime(admin, movieId, roomId("Room 1"), nextFutureSlot(), price);
     }
 
     private MvcResult holdOk(String token, long showtimeId, List<Long> seatIds) throws Exception {
@@ -258,104 +223,5 @@ class ReservationIntegrationTest {
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(objectMapper.writeValueAsString(new HoldBody(showtimeId, seatIds))))
                 .andReturn().getResponse().getStatus();
-    }
-
-    private List<Long> availableSeatIds(long showtimeId, int n) throws Exception {
-        JsonNode map = read(mockMvc.perform(get("/api/showtimes/" + showtimeId + "/seats"))
-                .andExpect(status().isOk())
-                .andReturn());
-        List<Long> ids = new ArrayList<>();
-        for (JsonNode seat : map.get("seats")) {
-            if ("AVAILABLE".equals(seat.get("status").asText())) {
-                ids.add(seat.get("showtimeSeatId").asLong());
-                if (ids.size() == n) {
-                    break;
-                }
-            }
-        }
-        assertThat(ids).hasSize(n);
-        return ids;
-    }
-
-    private String seatStatus(long showtimeId, Long showtimeSeatId) throws Exception {
-        JsonNode map = read(mockMvc.perform(get("/api/showtimes/" + showtimeId + "/seats"))
-                .andExpect(status().isOk())
-                .andReturn());
-        for (JsonNode seat : map.get("seats")) {
-            if (seat.get("showtimeSeatId").asLong() == showtimeSeatId) {
-                return seat.get("status").asText();
-            }
-        }
-        throw new AssertionError("seat " + showtimeSeatId + " not in map");
-    }
-
-    private long createMovie(String admin, int durationMinutes) throws Exception {
-        MovieBody body = new MovieBody("Movie " + uid(), null, null, durationMinutes, List.of());
-        return read(mockMvc.perform(post("/api/admin/movies")
-                        .header("Authorization", "Bearer " + admin)
-                        .contentType(MediaType.APPLICATION_JSON)
-                        .content(objectMapper.writeValueAsString(body)))
-                .andExpect(status().isCreated())
-                .andReturn()).get("id").asLong();
-    }
-
-    private long createShowtime(
-            String admin, long movieId, long roomId, LocalDateTime start, BigDecimal price)
-            throws Exception {
-        return read(mockMvc.perform(post("/api/admin/showtimes")
-                        .header("Authorization", "Bearer " + admin)
-                        .contentType(MediaType.APPLICATION_JSON)
-                        .content(objectMapper.writeValueAsString(
-                                new ShowtimeBody(movieId, roomId, start, price))))
-                .andExpect(status().isCreated())
-                .andReturn()).get("id").asLong();
-    }
-
-    private String uid() {
-        return UUID.randomUUID().toString().substring(0, 8);
-    }
-
-    private JsonNode read(MvcResult result) throws Exception {
-        return objectMapper.readTree(result.getResponse().getContentAsString());
-    }
-
-    private String adminToken() throws Exception {
-        return login(adminEmail, adminPassword);
-    }
-
-    private String userToken() throws Exception {
-        String email = "user-" + UUID.randomUUID() + "@example.com";
-        mockMvc.perform(post("/api/auth/signup")
-                        .contentType(MediaType.APPLICATION_JSON)
-                        .content(objectMapper.writeValueAsString(new SignupBody(email, "password123", "User"))))
-                .andExpect(status().isCreated());
-        return login(email, "password123");
-    }
-
-    private String login(String email, String password) throws Exception {
-        MvcResult result = mockMvc.perform(post("/api/auth/login")
-                        .contentType(MediaType.APPLICATION_JSON)
-                        .content(objectMapper.writeValueAsString(new LoginBody(email, password))))
-                .andExpect(status().isOk())
-                .andReturn();
-        return read(result).get("token").asText();
-    }
-
-    private record HoldBody(Long showtimeId, List<Long> showtimeSeatIds) {
-    }
-
-    private record ShowtimeBody(
-            Long movieId, Long theaterRoomId, LocalDateTime startTime, BigDecimal price) {
-    }
-
-    private record MovieBody(
-            String title, String description, String posterUrl,
-            Integer durationMinutes, List<String> genres) {
-    }
-
-    private record SignupBody(String email, String password, String name) {
-    }
-
-    private record LoginBody(String email, String password) {
     }
 }

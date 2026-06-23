@@ -4,11 +4,13 @@ import java.util.List;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.example.moviereservationsystem.service.ReservationService;
-import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
 /**
- * Releases expired seat holds. Runs every 60s.
+ * Releases expired seat holds. The recurring trigger lives in
+ * {@link ReservationExpiryScheduler}; this bean holds the sweep logic and stays
+ * unconditional so tests can drive {@link #runOnce()} directly even when the
+ * scheduled trigger is disabled.
  *
  * <p>This is a SEPARATE bean from ReservationService on purpose: each overdue
  * hold is expired by calling {@code reservationService.expireOne(id)}, which
@@ -26,12 +28,7 @@ public class ReservationExpiryJob {
 
     private final ReservationService reservationService;
 
-    @Scheduled(fixedRate = 60_000)
-    public void run() {
-        runOnce();
-    }
-
-    /** Extracted so tests can drive one sweep deterministically. Returns the count expired. */
+    /** Runs one expiry sweep. Returns the count expired. */
     public int runOnce() {
         List<Long> overdue = reservationService.findOverdueHoldIds();
         int expired = 0;

@@ -1,10 +1,9 @@
 package org.example.moviereservationsystem;
 
+import org.example.moviereservationsystem.support.AbstractIntegrationTest;
 import org.junit.jupiter.api.Test;
-import org.springframework.boot.test.context.SpringBootTest;
 
-@SpringBootTest
-class MovieReservationSystemApplicationTests {
+class MovieReservationSystemApplicationTests extends AbstractIntegrationTest {
 
     @Test
     void contextLoads() {

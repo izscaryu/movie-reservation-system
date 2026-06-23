@@ -35,6 +35,11 @@ app:
   reservation:
     # Minutes a PENDING hold is kept before the expiry job releases its seats.
     hold-minutes: ${RESERVATION_HOLD_MINUTES:10}
+  scheduling:
+    # Master switch for the @Scheduled expiry trigger. Default on; the test
+    # profile turns it off so the job never fires mid-suite (tests drive
+    # ReservationExpiryJob.runOnce() directly instead).
+    enabled: ${SCHEDULING_ENABLED:true}
   jwt:
     # HS256 signing key. Dev-only default below — MUST be overridden via
     # JWT_SECRET in any real environment. Must be >= 32 bytes for HS256.
