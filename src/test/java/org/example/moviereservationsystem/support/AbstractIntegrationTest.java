@@ -57,6 +57,11 @@ public abstract class AbstractIntegrationTest {
     // One container for the whole suite. Started in a static initializer (before
     // Spring), stopped by Testcontainers' Ryuk at JVM exit. The image matches
     // production (mysql:8.4) and docker-compose.
+    //
+    // NOTE: a shared container plus the truncate-all in wipeTransactionalTables()
+    // below ASSUMES sequential test execution. Do not enable JUnit parallelism
+    // without switching to per-class schemas/databases, or classes will wipe each
+    // other's rows mid-test. The assumption is encoded in junit-platform.properties.
     private static final MySQLContainer<?> MYSQL =
             new MySQLContainer<>("mysql:8.4")
                     .withDatabaseName("movie_reservation")
