@@ -4,7 +4,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import java.io.IOException;
-import java.time.LocalDateTime;
+import java.time.Instant;
 import java.util.Map;
 import org.springframework.http.MediaType;
 import org.springframework.security.access.AccessDeniedException;
@@ -28,7 +28,7 @@ public class RestAccessDeniedHandler implements AccessDeniedHandler {
         objectMapper.writeValue(
                 response.getWriter(),
                 Map.of(
-                        "timestamp", LocalDateTime.now().toString(),
+                        "timestamp", Instant.now().toString(),
                         "status", 403,
                         "error", "Forbidden",
                         "message", "Insufficient privileges",
