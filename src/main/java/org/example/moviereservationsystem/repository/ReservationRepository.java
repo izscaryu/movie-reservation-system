@@ -43,6 +43,28 @@ public interface ReservationRepository extends JpaRepository<Reservation, Long> 
             @Param("before") LocalDateTime before,
             Pageable pageable);
 
+    // Admin listing: a page of reservations filtered by optional status + an
+    // optional created_at range, with user / showtime / movie fetched for the
+    // admin view. No ORDER BY here on purpose — the caller passes a Pageable whose
+    // Sort is built from a server-side WHITELIST (AdminReservationService), so the
+    // client can never sort on arbitrary entity properties. Only @ManyToOne are
+    // fetch-joined (no to-many), so this pages in the database. Explicit countQuery
+    // because the main query fetch-joins.
+    @Query(value = "SELECT r FROM Reservation r "
+            + "JOIN FETCH r.user u JOIN FETCH r.showtime s JOIN FETCH s.movie m "
+            + "WHERE (:status IS NULL OR r.status = :status) "
+            + "AND (:from IS NULL OR r.createdAt >= :from) "
+            + "AND (:to IS NULL OR r.createdAt < :to)",
+            countQuery = "SELECT COUNT(r) FROM Reservation r "
+            + "WHERE (:status IS NULL OR r.status = :status) "
+            + "AND (:from IS NULL OR r.createdAt >= :from) "
+            + "AND (:to IS NULL OR r.createdAt < :to)")
+    Page<Reservation> findForAdmin(
+            @Param("status") ReservationStatus status,
+            @Param("from") LocalDateTime from,
+            @Param("to") LocalDateTime to,
+            Pageable pageable);
+
     // Ids of PENDING holds whose deadline has passed — the expiry job's worklist.
     // Hits idx_reservations_status_expires (status, expires_at).
     @Query("SELECT r.id FROM Reservation r "

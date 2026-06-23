@@ -14,12 +14,12 @@ import org.example.moviereservationsystem.dto.report.RevenueReport;
 import org.example.moviereservationsystem.entity.ReservationStatus;
 import org.example.moviereservationsystem.entity.SeatStatus;
 import org.example.moviereservationsystem.entity.Showtime;
-import org.example.moviereservationsystem.exception.BadRequestException;
 import org.example.moviereservationsystem.exception.ResourceNotFoundException;
 import org.example.moviereservationsystem.repository.ReservationRepository;
 import org.example.moviereservationsystem.repository.ReservationSeatRepository;
 import org.example.moviereservationsystem.repository.ShowtimeRepository;
 import org.example.moviereservationsystem.repository.ShowtimeSeatRepository;
+import org.example.moviereservationsystem.util.DateRanges;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.stereotype.Service;
@@ -48,9 +48,9 @@ public class ReportService {
 
     @Transactional(readOnly = true)
     public RevenueReport revenue(LocalDate from, LocalDate to) {
-        validateRange(from, to);
-        LocalDateTime fromInstant = startOfDay(from);
-        LocalDateTime toInstant = startOfDayAfter(to);
+        DateRanges.validateRange(from, to);
+        LocalDateTime fromInstant = DateRanges.startOfDay(from);
+        LocalDateTime toInstant = DateRanges.startOfDayAfter(to);
         BigDecimal total =
                 reservationRepository.sumRevenue(ReservationStatus.CONFIRMED, fromInstant, toInstant);
         long count =
@@ -60,9 +60,9 @@ public class ReportService {
 
     @Transactional(readOnly = true)
     public List<MovieRevenue> revenueByMovie(LocalDate from, LocalDate to) {
-        validateRange(from, to);
+        DateRanges.validateRange(from, to);
         return reservationRepository.revenueByMovie(
-                ReservationStatus.CONFIRMED, startOfDay(from), startOfDayAfter(to));
+                ReservationStatus.CONFIRMED, DateRanges.startOfDay(from), DateRanges.startOfDayAfter(to));
     }
 
     @Transactional(readOnly = true)
@@ -87,34 +87,16 @@ public class ReportService {
 
     @Transactional(readOnly = true)
     public PageResponse<PopularMovie> popularMovies(LocalDate from, LocalDate to, int page, int size) {
-        validateRange(from, to);
+        DateRanges.validateRange(from, to);
         // page/size bounds (size >= 1, <= MAX_PAGE_SIZE) are enforced at the
         // controller via @Validated, so no extra limit check is needed here.
         Page<PopularMovie> result = reservationSeatRepository.popularMovies(
-                ReservationStatus.CONFIRMED, startOfDay(from), startOfDayAfter(to),
+                ReservationStatus.CONFIRMED, DateRanges.startOfDay(from), DateRanges.startOfDayAfter(to),
                 PageRequest.of(page, size));
         return PageResponse.from(result);
     }
 
     // --- helpers ---
-
-    private void validateRange(LocalDate from, LocalDate to) {
-        if (from != null && to != null && from.isAfter(to)) {
-            throw new BadRequestException("'from' must not be after 'to'");
-        }
-    }
-
-    // Inclusive lower bound: start of the 'from' day. Null = unbounded below.
-    private LocalDateTime startOfDay(LocalDate from) {
-        return from == null ? null : from.atStartOfDay();
-    }
-
-    // Inclusive 'to' made half-open: start of the day AFTER 'to', so the whole
-    // 'to' day is included while the query stays a clean createdAt < bound. Null
-    // = unbounded above.
-    private LocalDateTime startOfDayAfter(LocalDate to) {
-        return to == null ? null : to.plusDays(1).atStartOfDay();
-    }
 
     // Occupancy as a percentage in [0, 100], 2-decimal scale. Guards total == 0
     // (cannot happen — a showtime always auto-generates its seat map — but never
