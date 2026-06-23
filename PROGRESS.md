@@ -12,7 +12,7 @@ Spec: `movie-reservation-system-guide.md`.
 | 4 | Showtime & Seat Setup | ✅ Done |
 | 5 | Reservation Flow (core) | ✅ Done |
 | 6 | Admin Reporting | ✅ Done |
-| 7 | Polish & Cross-Cutting Concerns | ⬜ Not started |
+| 7 | Polish & Cross-Cutting Concerns | ✅ Done |
 | 8 | Testing | ⬜ Not started |
 | 9 | Containerization & Documentation | ⬜ Not started |
 
@@ -317,3 +317,92 @@ Spec: `movie-reservation-system-guide.md`.
   from popular yet included in revenue; zero-data past window → `0`/empty (the NULL-SUM guard);
   `from > to` and `limit=0` → 400; USER → 403 / no-token → 401. Full suite green: **35 tests, 0
   failures**.
+
+## Phase 7 — notes / decisions
+
+- **Scope:** error-shape completion, the test-isolation overhaul (Testcontainers), pagination
+  across list endpoints, the deferred `GET /api/admin/reservations`, observability logging, and
+  Swagger — built in 7 small slices with a review checkpoint after the Testcontainers migration.
+- **Error contract (slice 2).** `GlobalExceptionHandler` already emitted the target
+  `{timestamp,status,error,message,path}` shape, so this **added** the missing handlers, it didn't
+  rewrite: catch-all `Exception` → **500** with a generic `"Internal server error"` body (the real
+  exception is **logged**, never echoed — no internals leak); malformed JSON
+  (`HttpMessageNotReadableException`), param **type mismatch**, **missing param**, and bean
+  `ConstraintViolationException` → **400**; unknown path → **404**; unsupported method → **405**.
+  The 405/415/missing-param mappings are explicit so the new catch-all can't regress those standard
+  MVC errors into 500. Timestamps switched to **`Instant`** (UTC ISO-8601), including the 401/403
+  security-filter bodies, so the whole API is uniform.
+- **Boot 3.5 no-handler (verified, not assumed).** An unknown path throws **`NoResourceFoundException`**
+  (not `NoHandlerFoundException`); it reaches `@RestControllerAdvice` and returns our shape. Both are
+  mapped defensively → 404; no `throw-exception-if-no-handler-found` needed. Pinned by
+  `ErrorHandlingIntegrationTest`.
+- **409 narrowing (slice 2).** `DataIntegrityViolationException` was split out of the unconditional
+  concurrency group. Only the UNIQUE seat backstop firing — matched on its **explicit V1 constraint
+  name** `uq_reservation_seats_showtime_seat` anywhere in the cause chain (reliable; not a guessed
+  auto-name) — stays **409**; any other integrity error now falls through to a **logged 500** instead
+  of being mislabelled a seat conflict. Optimistic-lock + deadlock exceptions remain unconditional 409.
+- **Test foundation = Testcontainers (slice 3, THE risky one).** One throwaway `mysql:8.4` started
+  once per JVM and reused by every class (context built once, cached); datasource via
+  `@DynamicPropertySource` — **no `.env` / port 3307 dependency** in tests any more. A shared
+  `AbstractIntegrationTest` base holds the container, a **per-test wipe**, the deterministic time
+  source, and the token/movie/showtime/seat helpers that were duplicated across all five classes.
+  - **Cleanup (explicit decision):** per-test single-connection `TRUNCATE` of the 7 **transactional**
+    tables (`reservation_seats, reservations, showtime_seats, showtimes, movie_genre, movies, genres`)
+    in FK-safe order — single connection because `FOREIGN_KEY_CHECKS` is session-scoped. The **seed**
+    tables (`users, theater_rooms, seats`) are **preserved** (populated once by the CommandLineRunners
+    at context start; login / showtime-creation / expiry depend on them). Seed survival is *proven*,
+    not assumed: `ShowtimeIntegrationTest` logs in as the seeded admin and reads the seeded Room 2's
+    80 seats after a truncate.
+  - **Deterministic data:** the random far-future-offset hack is gone, replaced by a static,
+    monotonic, day-spaced `nextFutureSlot()`. Truncate removes cross-test collisions; day-spacing
+    prevents same-room overlap within a test.
+  - **Parallelism guard:** the shared container + truncate-all assume **sequential** execution;
+    `junit-platform.properties` pins `parallel.enabled=false` and the base class documents why.
+- **Scheduling gated at the TRIGGER, not the job (slice 3).** `ReservationExpiryJob.runOnce()` stays
+  unconditional (tests drive it); the `@Scheduled` trigger moved to `ReservationExpiryScheduler`,
+  gated by `@ConditionalOnProperty(app.scheduling.enabled, matchIfMissing=true)`. Default on in prod;
+  the **test profile** sets it `false` so the job never fires mid-suite.
+- **Pagination via `PageResponse<T>` (slice 4).** A stable envelope
+  (`content,page,size,totalElements,totalPages,first,last`) — Spring's `Page`/`PageImpl` JSON is
+  **never** serialized (not contract-stable, violates DTOs-only). `MAX_PAGE_SIZE=100`; page/size
+  bounds enforced at the controllers via `@Validated` + `@Min/@Max` → 400.
+  - **Movies** (both modes) page the **IDs** first then fetch — never a collection fetch (avoids
+    HHH000104 in-memory pagination). Explicit `countQuery` (`COUNT(m)` unfiltered,
+    `COUNT(DISTINCT m.id)` for the genre filter); the second fetch **re-applies `ORDER BY m.title,
+    m.id`** because an `IN(...)` doesn't preserve order. The genre two-step already re-sorted but
+    lacked the **`m.id` tiebreaker** — a latent ordering bug under duplicate titles (a row could land
+    on two pages or none); **fixed**.
+  - **reservations/me** → `Page`; the upcoming/past filter, previously applied **in memory**
+    (incompatible with paging), is pushed into the query as start-time bounds. Safe to page directly:
+    only `@ManyToOne` showtime/movie are fetch-joined.
+  - **popular-movies** → `Page` (+ `COUNT(DISTINCT m.id)` count query, `m.id` tiebreaker). The old
+    `?limit` top-N became `?page/?size`.
+- **`GET /api/admin/reservations` (slice 5).** Paginated; filter by **status** (enum-bound; bad value
+  → 400) + **created_at** range. **Reuse, not reimplement:** the Phase 6 date helper was extracted to
+  `util/DateRanges` (inclusive both ends, half-open internally, `from > to` → 400) and both
+  `ReportService` and the new `AdminReservationService` route through it. **Sort is whitelisted**
+  (`createdAt,totalPrice,status,id`; unknown field / bad direction → 400) and built server-side with an
+  id tiebreaker — the client's raw `Pageable` sort is **never** passed through. New
+  `AdminReservationView` DTO includes the owning **user** + showtime/movie context; seat detail is
+  omitted to keep the query free of a to-many fetch. Lands under the existing `/api/admin/**` tier
+  (no security change).
+- **Observability (slice 6).** Logs at **reservation created** (PENDING, with user/showtime/seat
+  count/expiry), **seat-lock conflict** on both 409 paths (explicit already-taken + optimistic-lock
+  race), and the **expiry sweep** (debug per run, info on actual expirations).
+- **API docs (slice 6).** `springdoc-openapi-starter-webmvc-ui` **2.8.9** (version pinned — not in the
+  Boot BOM). Swagger UI at `/swagger-ui.html`, spec at `/v3/api-docs`; both **permitted** in the
+  SecurityFilterChain (else they'd 401 under `anyRequest().authenticated()`). `OpenApiConfig` declares
+  the JWT **bearer `@SecurityScheme`** + a global requirement, so the UI's Authorize button sends
+  `Authorization: Bearer <token>`.
+- **Housekeeping (slices 1, 7).** Removed the untracked `autentificationSuccess.txt` scratch JWT log
+  (+ gitignore). `.gitattributes` gained `* text=auto` (silences the CRLF warnings). `src/.http` is now
+  committed as living API docs (Phase 4–7 request sections) alongside the **non-secret**
+  `src/http-client.env.json`; `adminPassword` moved to the **gitignored**
+  `src/http-client.private.env.json`.
+- **Out of scope (noted, not built):** CORS, a `confirmedAt` column, and resolving the native-3306 vs
+  Docker-3307 ambiguity (Testcontainers makes the test suite independent of it regardless).
+- **Verified:** full suite green on Testcontainers, stable across repeated runs — **53 tests, 0
+  failures** (the 35 Phase-6 tests migrated, plus error-shape, movie/reservation/report pagination,
+  admin-reservations, and OpenAPI coverage). New test classes: `ErrorHandlingIntegrationTest`,
+  `MoviePaginationTest`, `AdminReservationIntegrationTest`, `OpenApiIntegrationTest`, and the shared
+  `AbstractIntegrationTest` base.

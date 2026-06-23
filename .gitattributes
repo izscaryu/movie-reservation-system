@@ -1,2 +1,6 @@
+# Normalise line endings: Git stores LF, checks out native. Silences the
+# "LF will be replaced by CRLF" warnings on this Windows checkout.
+* text=auto
+
 /mvnw text eol=lf
 *.cmd text eol=crlf

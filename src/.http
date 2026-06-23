@@ -1,0 +1,386 @@
+###############################################
+# PHASE 4 — Showtime & Seat Setup
+# Append below your Phase 3 requests; run top-to-bottom (or "Run all in file").
+# Rooms seeded by RoomSeatInitializer: Room 1 = 5x8 (40 seats),
+# Room 2 = 8x10 (80), Room 3 = 6x9 (54). theaterRoomId 1/2/3 assume a fresh
+# seed — if your DB gave the rooms different ids, adjust the ids below.
+# Assumes the Phase 3 user@test.com exists; on a fresh DB, run your Phase 3
+# signup first.
+###############################################
+
+### P4.1 — Admin login (refresh adminToken)
+POST {{base}}/api/auth/login
+Content-Type: application/json
+
+{ "email": "{{adminEmail}}", "password": "{{adminPassword}}" }
+
+> {%
+    client.test("admin login 200", function() { client.assert(response.status === 200, "got " + response.status); });
+    client.global.set("adminToken", response.body.token);
+%}
+
+### P4.2 — User login (refresh userToken)
+POST {{base}}/api/auth/login
+Content-Type: application/json
+
+{ "email": "user@test.com", "password": "password123" }
+
+> {%
+    client.global.set("userToken", response.body.token);
+%}
+
+### P4.3 — Create a fresh movie to attach showtimes to -> 201, capture movieId
+POST {{base}}/api/admin/movies
+Authorization: Bearer {{adminToken}}
+Content-Type: application/json
+
+{
+  "title": "Dune: Part Two",
+  "description": "Paul Atreides unites with the Fremen.",
+  "durationMinutes": 166,
+  "genres": ["Sci-Fi", "Adventure"]
+}
+
+> {%
+    client.test("movie created 201", function() { client.assert(response.status === 201, "got " + response.status); });
+    client.global.set("movieId", response.body.id);
+%}
+
+### P4.4 — Admin creates a showtime in Room 2 (80 seats) -> 201, capture showtimeId
+POST {{base}}/api/admin/showtimes
+Authorization: Bearer {{adminToken}}
+Content-Type: application/json
+
+{
+  "movieId": {{movieId}},
+  "theaterRoomId": 2,
+  "startTime": "2026-12-01T18:00:00",
+  "price": 12.50
+}
+
+> {%
+    client.test("showtime created 201", function() { client.assert(response.status === 201, "got " + response.status); });
+    client.global.set("showtimeId", response.body.id);
+%}
+
+### P4.5 — Public seat map -> 200 (open the body: 80 entries, all AVAILABLE)
+GET {{base}}/api/showtimes/{{showtimeId}}/seats
+
+> {%
+    client.test("seat map 200", function() { client.assert(response.status === 200); });
+    // Eyeball the response: Room 2 = 8x10, so 80 seat entries, every status == "AVAILABLE".
+%}
+
+### P4.6 — Public list of showtimes for the movie on that date -> 200
+GET {{base}}/api/movies/{{movieId}}/showtimes?date=2026-12-01
+
+> {%
+    client.test("showtime list 200", function() { client.assert(response.status === 200); });
+%}
+
+### P4.7 — Overlapping showtime, same room (Room 2) -> 409
+POST {{base}}/api/admin/showtimes
+Authorization: Bearer {{adminToken}}
+Content-Type: application/json
+
+{
+  "movieId": {{movieId}},
+  "theaterRoomId": 2,
+  "startTime": "2026-12-01T18:30:00",
+  "price": 12.50
+}
+
+> {%
+    client.test("overlap rejected 409", function() { client.assert(response.status === 409, "got " + response.status); });
+%}
+
+### P4.8 — Same time, different room (Room 1) -> 201 (no conflict across rooms)
+POST {{base}}/api/admin/showtimes
+Authorization: Bearer {{adminToken}}
+Content-Type: application/json
+
+{
+  "movieId": {{movieId}},
+  "theaterRoomId": 1,
+  "startTime": "2026-12-01T18:00:00",
+  "price": 10.00
+}
+
+> {%
+    client.test("different room allowed 201", function() { client.assert(response.status === 201, "got " + response.status); });
+%}
+
+### P4.9 — Invalid body (missing movieId, negative price) -> 400
+POST {{base}}/api/admin/showtimes
+Authorization: Bearer {{adminToken}}
+Content-Type: application/json
+
+{ "theaterRoomId": 2, "startTime": "2026-12-01T20:00:00", "price": -5 }
+
+> {%
+    client.test("validation 400", function() { client.assert(response.status === 400, "got " + response.status); });
+%}
+
+### P4.10 — USER tries to create a showtime -> 403
+POST {{base}}/api/admin/showtimes
+Authorization: Bearer {{userToken}}
+Content-Type: application/json
+
+{ "movieId": {{movieId}}, "theaterRoomId": 2, "startTime": "2027-01-01T18:00:00", "price": 9.00 }
+
+> {%
+    client.test("user forbidden 403", function() { client.assert(response.status === 403, "got " + response.status); });
+%}
+
+### P4.11 — No token -> 401
+POST {{base}}/api/admin/showtimes
+Content-Type: application/json
+
+{ "movieId": {{movieId}}, "theaterRoomId": 2, "startTime": "2027-01-01T18:00:00", "price": 9.00 }
+
+> {%
+    client.test("unauthorized 401", function() { client.assert(response.status === 401, "got " + response.status); });
+%}
+
+### P4.12 — Soft-delete the movie -> 204 (sets up the next two checks)
+DELETE {{base}}/api/admin/movies/{{movieId}}
+Authorization: Bearer {{adminToken}}
+
+> {%
+    client.test("movie soft-deleted 204", function() { client.assert(response.status === 204); });
+%}
+
+### P4.13 — Create a showtime for the now-deleted movie -> 404
+POST {{base}}/api/admin/showtimes
+Authorization: Bearer {{adminToken}}
+Content-Type: application/json
+
+{
+  "movieId": {{movieId}},
+  "theaterRoomId": 3,
+  "startTime": "2027-02-01T18:00:00",
+  "price": 11.00
+}
+
+> {%
+    client.test("showtime for deleted movie 404", function() { client.assert(response.status === 404, "got " + response.status); });
+%}
+
+### P4.14 — Public showtime list for the deleted movie -> 404 (hide rule)
+GET {{base}}/api/movies/{{movieId}}/showtimes?date=2026-12-01
+
+> {%
+    client.test("deleted movie showtimes hidden 404", function() { client.assert(response.status === 404, "got " + response.status); });
+%}
+
+###############################################
+# PHASE 5 — Reservation flow (hold / confirm / cancel)
+# Self-contained: logs in, makes a fresh movie + showtime, then reserves.
+# Assumes a regular user (login user/password123) exists; sign one up first if not.
+###############################################
+
+### P5.1 — Admin login (refresh adminToken)
+POST {{base}}/api/auth/login
+Content-Type: application/json
+
+{ "email": "{{adminEmail}}", "password": "{{adminPassword}}" }
+
+> {%
+    client.test("admin login 200", function() { client.assert(response.status === 200, "got " + response.status); });
+    client.global.set("adminToken", response.body.token);
+%}
+
+### P5.2 — User login (refresh userToken)
+POST {{base}}/api/auth/login
+Content-Type: application/json
+
+{ "email": "user@test.com", "password": "password123" }
+
+> {%
+    client.global.set("userToken", response.body.token);
+%}
+
+### P5.3 — Fresh movie -> capture resMovieId
+POST {{base}}/api/admin/movies
+Authorization: Bearer {{adminToken}}
+Content-Type: application/json
+
+{ "title": "Reservation Demo", "durationMinutes": 120, "genres": ["Drama"] }
+
+> {%
+    client.global.set("resMovieId", response.body.id);
+%}
+
+### P5.4 — Showtime in Room 1 (40 seats), far future -> capture resShowtimeId
+POST {{base}}/api/admin/showtimes
+Authorization: Bearer {{adminToken}}
+Content-Type: application/json
+
+{ "movieId": {{resMovieId}}, "theaterRoomId": 1, "startTime": "2027-05-01T18:00:00", "price": 10.00 }
+
+> {%
+    client.test("showtime 201", function() { client.assert(response.status === 201, "got " + response.status); });
+    client.global.set("resShowtimeId", response.body.id);
+%}
+
+### P5.5 — Seat map -> capture two AVAILABLE showtimeSeatIds
+GET {{base}}/api/showtimes/{{resShowtimeId}}/seats
+
+> {%
+    client.test("seat map 200", function() { client.assert(response.status === 200); });
+    client.global.set("seatId1", response.body.seats[0].showtimeSeatId);
+    client.global.set("seatId2", response.body.seats[1].showtimeSeatId);
+%}
+
+### P5.6 — Hold the two seats -> 201 PENDING, capture reservationId
+POST {{base}}/api/reservations
+Authorization: Bearer {{userToken}}
+Content-Type: application/json
+
+{ "showtimeId": {{resShowtimeId}}, "showtimeSeatIds": [{{seatId1}}, {{seatId2}}] }
+
+> {%
+    client.test("hold 201", function() { client.assert(response.status === 201, "got " + response.status); });
+    client.test("status PENDING", function() { client.assert(response.body.status === "PENDING"); });
+    client.global.set("reservationId", response.body.id);
+%}
+
+### P5.7 — A second user holding the SAME seat -> 409 (overbooking guard)
+POST {{base}}/api/reservations
+Authorization: Bearer {{userToken}}
+Content-Type: application/json
+
+{ "showtimeId": {{resShowtimeId}}, "showtimeSeatIds": [{{seatId1}}] }
+
+> {%
+    client.test("already held 409", function() { client.assert(response.status === 409, "got " + response.status); });
+%}
+
+### P5.8 — Confirm the hold -> 200 CONFIRMED (seats BOOKED)
+POST {{base}}/api/reservations/{{reservationId}}/confirm
+Authorization: Bearer {{userToken}}
+
+> {%
+    client.test("confirm 200", function() { client.assert(response.status === 200, "got " + response.status); });
+    client.test("status CONFIRMED", function() { client.assert(response.body.status === "CONFIRMED"); });
+%}
+
+### P5.9 — Empty seat list -> 400 validation
+POST {{base}}/api/reservations
+Authorization: Bearer {{userToken}}
+Content-Type: application/json
+
+{ "showtimeId": {{resShowtimeId}}, "showtimeSeatIds": [] }
+
+> {%
+    client.test("validation 400", function() { client.assert(response.status === 400, "got " + response.status); });
+%}
+
+###############################################
+# PHASE 6 — Admin reporting
+###############################################
+
+### P6.1 — Admin login (refresh adminToken)
+POST {{base}}/api/auth/login
+Content-Type: application/json
+
+{ "email": "{{adminEmail}}", "password": "{{adminPassword}}" }
+
+> {% client.global.set("adminToken", response.body.token); %}
+
+### P6.2 — Total revenue (CONFIRMED only), open date range
+GET {{base}}/api/admin/reports/revenue
+Authorization: Bearer {{adminToken}}
+
+> {% client.test("revenue 200", function() { client.assert(response.status === 200); }); %}
+
+### P6.3 — Revenue by movie
+GET {{base}}/api/admin/reports/revenue/by-movie
+Authorization: Bearer {{adminToken}}
+
+> {% client.test("by-movie 200", function() { client.assert(response.status === 200); }); %}
+
+### P6.4 — Occupancy for the Phase 5 showtime
+GET {{base}}/api/admin/reports/occupancy?showtimeId={{resShowtimeId}}
+Authorization: Bearer {{adminToken}}
+
+> {% client.test("occupancy 200", function() { client.assert(response.status === 200); }); %}
+
+### P6.5 — Popular movies (now a Page: page/size, not limit)
+GET {{base}}/api/admin/reports/popular-movies?page=0&size=10
+Authorization: Bearer {{adminToken}}
+
+> {% client.test("popular 200", function() { client.assert(response.status === 200); }); %}
+
+###############################################
+# PHASE 7 — Pagination, admin reservations, error shape, docs
+###############################################
+
+### P7.1 — Movies, paginated (PageResponse envelope: content/totalElements/...)
+GET {{base}}/api/movies?page=0&size=5
+
+> {%
+    client.test("movies page 200", function() { client.assert(response.status === 200); });
+    client.test("has envelope", function() { client.assert(response.body.totalElements !== undefined && response.body.content !== undefined); });
+%}
+
+### P7.2 — Page size over the cap (100) -> 400
+GET {{base}}/api/movies?size=101
+
+> {% client.test("size cap 400", function() { client.assert(response.status === 400, "got " + response.status); }); %}
+
+### P7.3 — My reservations, paginated + filtered
+GET {{base}}/api/reservations/me?filter=upcoming&page=0&size=5
+Authorization: Bearer {{userToken}}
+
+> {% client.test("/me page 200", function() { client.assert(response.status === 200); }); %}
+
+### P7.4 — Admin reservations: paginated, default sort createdAt desc
+GET {{base}}/api/admin/reservations?page=0&size=10
+Authorization: Bearer {{adminToken}}
+
+> {%
+    client.test("admin reservations 200", function() { client.assert(response.status === 200); });
+    client.test("admin view has user", function() {
+        if (response.body.content.length > 0) { client.assert(response.body.content[0].userEmail !== undefined); }
+    });
+%}
+
+### P7.5 — Admin reservations filtered by status + sorted by totalPrice asc
+GET {{base}}/api/admin/reservations?status=CONFIRMED&sort=totalPrice&direction=asc
+Authorization: Bearer {{adminToken}}
+
+> {% client.test("filtered+sorted 200", function() { client.assert(response.status === 200); }); %}
+
+### P7.6 — Non-whitelisted sort field -> 400 (not passed to the query)
+GET {{base}}/api/admin/reservations?sort=user.password
+Authorization: Bearer {{adminToken}}
+
+> {% client.test("bad sort 400", function() { client.assert(response.status === 400, "got " + response.status); }); %}
+
+### P7.7 — Malformed JSON body -> 400 (uniform error shape)
+POST {{base}}/api/auth/login
+Content-Type: application/json
+
+{ not valid json
+
+> {%
+    client.test("malformed 400", function() { client.assert(response.status === 400, "got " + response.status); });
+    client.test("error shape", function() { client.assert(response.body.timestamp && response.body.path && response.body.status === 400); });
+%}
+
+### P7.8 — Unknown path (authenticated) -> 404 in the uniform shape
+GET {{base}}/api/does-not-exist
+Authorization: Bearer {{userToken}}
+
+> {% client.test("unknown path 404", function() { client.assert(response.status === 404, "got " + response.status); }); %}
+
+### P7.9 — Wrong method on a mapped path -> 405
+GET {{base}}/api/auth/login
+
+> {% client.test("method not allowed 405", function() { client.assert(response.status === 405, "got " + response.status); }); %}
+
+### P7.10 — OpenAPI spec is public -> 200 (Swagger UI at /swagger-ui.html)
+GET {{base}}/v3/api-docs
+
+> {% client.test("openapi 200", function() { client.assert(response.status === 200); }); %}

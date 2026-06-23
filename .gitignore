@@ -35,6 +35,8 @@ build/
 ### Environment / secrets ###
 .env
 *.local
+# IntelliJ HTTP Client secrets (the non-secret http-client.env.json IS committed).
+http-client.private.env.json
 
 ### Logs ###
 *.log
