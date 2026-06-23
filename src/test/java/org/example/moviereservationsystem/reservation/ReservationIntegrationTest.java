@@ -187,6 +187,47 @@ class ReservationIntegrationTest extends AbstractIntegrationTest {
                 .andExpect(status().isBadRequest());
     }
 
+    @Test
+    void mine_isPaginatedAndFiltered() throws Exception {
+        long showtimeId = newShowtime(100, new BigDecimal("10.00"));
+        List<Long> seats = availableSeatIds(showtimeId, 5);
+        String user = userToken();
+        // Five separate single-seat reservations for the one user.
+        for (Long seat : seats) {
+            holdOk(user, showtimeId, List.of(seat));
+        }
+
+        JsonNode page0 = read(mockMvc.perform(get("/api/reservations/me")
+                        .header("Authorization", "Bearer " + user)
+                        .param("page", "0").param("size", "2"))
+                .andExpect(status().isOk()).andReturn());
+        assertThat(page0.get("totalElements").asLong()).isEqualTo(5);
+        assertThat(page0.get("totalPages").asInt()).isEqualTo(3);
+        assertThat(page0.get("content")).hasSize(2);
+        assertThat(page0.get("first").asBoolean()).isTrue();
+
+        JsonNode page2 = read(mockMvc.perform(get("/api/reservations/me")
+                        .header("Authorization", "Bearer " + user)
+                        .param("page", "2").param("size", "2"))
+                .andExpect(status().isOk()).andReturn());
+        assertThat(page2.get("content")).hasSize(1); // 5 = 2 + 2 + 1
+        assertThat(page2.get("last").asBoolean()).isTrue();
+
+        // Filter is applied at the DB level: every showtime is in the future, so
+        // "upcoming" keeps all five and "past" matches none.
+        long upcoming = read(mockMvc.perform(get("/api/reservations/me")
+                        .header("Authorization", "Bearer " + user)
+                        .param("filter", "upcoming"))
+                .andExpect(status().isOk()).andReturn()).get("totalElements").asLong();
+        assertThat(upcoming).isEqualTo(5);
+
+        long past = read(mockMvc.perform(get("/api/reservations/me")
+                        .header("Authorization", "Bearer " + user)
+                        .param("filter", "past"))
+                .andExpect(status().isOk()).andReturn()).get("totalElements").asLong();
+        assertThat(past).isZero();
+    }
+
     // --- reservation-specific helpers ---
 
     private Callable<Integer> racingHold(CountDownLatch start, String token, long showtimeId, Long seat) {

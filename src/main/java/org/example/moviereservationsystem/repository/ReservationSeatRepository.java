@@ -6,6 +6,7 @@ import java.util.List;
 import org.example.moviereservationsystem.dto.report.PopularMovie;
 import org.example.moviereservationsystem.entity.ReservationSeat;
 import org.example.moviereservationsystem.entity.ReservationStatus;
+import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Query;
@@ -39,17 +40,23 @@ public interface ReservationSeatRepository extends JpaRepository<ReservationSeat
     // expired holds already dropped their link rows in Phase 5, but PENDING holds
     // still have rows, so CONFIRMED is enforced explicitly. Soft-deleted movies
     // are EXCLUDED (a "what to promote now" list). Date-bounded on the
-    // reservation's created_at; null from/to leaves that bound open. Pageable
-    // supplies the top-N LIMIT (will become a Page in Phase 7).
-    @Query("SELECT new org.example.moviereservationsystem.dto.report.PopularMovie("
+    // reservation's created_at; null from/to leaves that bound open. m.id breaks
+    // ticket-count ties so the page order is deterministic across pages.
+    // COUNT(DISTINCT m.id) for the page total (rows are grouped by movie).
+    @Query(value = "SELECT new org.example.moviereservationsystem.dto.report.PopularMovie("
             + "m.id, m.title, COUNT(rs.id)) "
             + "FROM ReservationSeat rs JOIN rs.reservation r JOIN r.showtime s JOIN s.movie m "
             + "WHERE r.status = :status AND m.deletedAt IS NULL "
             + "AND (:from IS NULL OR r.createdAt >= :from) "
             + "AND (:to IS NULL OR r.createdAt < :to) "
             + "GROUP BY m.id, m.title "
-            + "ORDER BY COUNT(rs.id) DESC")
-    List<PopularMovie> popularMovies(
+            + "ORDER BY COUNT(rs.id) DESC, m.id ASC",
+            countQuery = "SELECT COUNT(DISTINCT m.id) "
+            + "FROM ReservationSeat rs JOIN rs.reservation r JOIN r.showtime s JOIN s.movie m "
+            + "WHERE r.status = :status AND m.deletedAt IS NULL "
+            + "AND (:from IS NULL OR r.createdAt >= :from) "
+            + "AND (:to IS NULL OR r.createdAt < :to)")
+    Page<PopularMovie> popularMovies(
             @Param("status") ReservationStatus status,
             @Param("from") LocalDateTime from,
             @Param("to") LocalDateTime to,

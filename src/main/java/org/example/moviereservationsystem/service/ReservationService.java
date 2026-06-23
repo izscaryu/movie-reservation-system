@@ -9,6 +9,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
 import lombok.RequiredArgsConstructor;
+import org.example.moviereservationsystem.dto.PageResponse;
 import org.example.moviereservationsystem.dto.reservation.ReservationRequest;
 import org.example.moviereservationsystem.dto.reservation.ReservationResponse;
 import org.example.moviereservationsystem.entity.Reservation;
@@ -27,6 +28,8 @@ import org.example.moviereservationsystem.repository.ShowtimeRepository;
 import org.example.moviereservationsystem.repository.ShowtimeSeatRepository;
 import org.example.moviereservationsystem.repository.UserRepository;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.PageRequest;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -186,30 +189,30 @@ public class ReservationService {
     }
 
     @Transactional(readOnly = true)
-    public List<ReservationResponse> listMine(Long userId, String filter) {
-        List<Reservation> reservations = reservationRepository.findByUserIdWithShowtime(userId);
+    public PageResponse<ReservationResponse> listMine(Long userId, String filter, int page, int size) {
+        // The upcoming/past filter is pushed into the query as start-time bounds
+        // so the page is computed over the filtered set (filtering in memory after
+        // paging would silently drop rows from each page).
         LocalDateTime now = LocalDateTime.now();
-        if ("upcoming".equalsIgnoreCase(filter)) {
-            reservations = reservations.stream()
-                    .filter(r -> r.getShowtime().getStartTime().isAfter(now))
-                    .toList();
-        } else if ("past".equalsIgnoreCase(filter)) {
-            reservations = reservations.stream()
-                    .filter(r -> !r.getShowtime().getStartTime().isAfter(now))
-                    .toList();
-        }
+        LocalDateTime after = "upcoming".equalsIgnoreCase(filter) ? now : null;
+        LocalDateTime before = "past".equalsIgnoreCase(filter) ? now : null;
+
+        Page<Reservation> resPage = reservationRepository.findByUserIdWithShowtime(
+                userId, after, before, PageRequest.of(page, size));
+        List<Reservation> reservations = resPage.getContent();
         if (reservations.isEmpty()) {
-            return List.of();
+            return PageResponse.of(List.of(), resPage);
         }
 
         List<Long> ids = reservations.stream().map(Reservation::getId).toList();
         Map<Long, List<ReservationSeat>> seatsByReservation =
                 reservationSeatRepository.findByReservationIdInWithSeat(ids).stream()
                         .collect(Collectors.groupingBy(rs -> rs.getReservation().getId()));
-        return reservations.stream()
+        List<ReservationResponse> content = reservations.stream()
                 .map(r -> ReservationResponse.of(
                         r, seatsByReservation.getOrDefault(r.getId(), List.of())))
                 .toList();
+        return PageResponse.of(content, resPage);
     }
 
     // --- expiry (called per-reservation THROUGH the proxy by ReservationExpiryJob) ---

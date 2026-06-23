@@ -8,6 +8,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.HashSet;
 import lombok.RequiredArgsConstructor;
+import org.example.moviereservationsystem.dto.PageResponse;
 import org.example.moviereservationsystem.dto.movie.MovieRequest;
 import org.example.moviereservationsystem.dto.movie.MovieResponse;
 import org.example.moviereservationsystem.entity.Genre;
@@ -15,6 +16,9 @@ import org.example.moviereservationsystem.entity.Movie;
 import org.example.moviereservationsystem.exception.ResourceNotFoundException;
 import org.example.moviereservationsystem.repository.GenreRepository;
 import org.example.moviereservationsystem.repository.MovieRepository;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.PageRequest;
+import org.springframework.data.domain.Pageable;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -57,18 +61,20 @@ public class MovieService {
     }
 
     @Transactional(readOnly = true)
-    public List<MovieResponse> list(String genre) {
-        List<Movie> movies;
-        if (genre == null || genre.isBlank()) {
-            movies = movieRepository.findAllActiveWithGenres();
-        } else {
-            // Two-step so the genre filter never truncates each movie's genre
-            // set: find matching IDs, then fetch those IDs with their full
-            // genres. Empty match short-circuits (avoids an `IN ()` query).
-            List<Long> ids = movieRepository.findIdsByGenreName(genre.trim());
-            movies = ids.isEmpty() ? List.of() : movieRepository.findByIdsWithGenres(ids);
-        }
-        return movies.stream().map(MovieResponse::fromEntity).toList();
+    public PageResponse<MovieResponse> list(String genre, int page, int size) {
+        Pageable pageable = PageRequest.of(page, size);
+        // Two-step in both modes so the genre fetch never truncates a movie's
+        // genre set and so paging happens on IDs (never on a collection fetch):
+        // page the matching IDs in (title, id) order, then fetch those IDs with
+        // their full genres re-applying the same order. Empty page short-circuits
+        // (avoids an `IN ()` query). Page metadata comes from the ID page.
+        Page<Long> idPage = (genre == null || genre.isBlank())
+                ? movieRepository.findActiveIds(pageable)
+                : movieRepository.findIdsByGenreName(genre.trim(), pageable);
+        List<Long> ids = idPage.getContent();
+        List<Movie> movies = ids.isEmpty() ? List.of() : movieRepository.findByIdsWithGenres(ids);
+        List<MovieResponse> content = movies.stream().map(MovieResponse::fromEntity).toList();
+        return PageResponse.of(content, idPage);
     }
 
     @Transactional(readOnly = true)

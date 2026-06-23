@@ -1,8 +1,11 @@
 package org.example.moviereservationsystem.controller;
 
+import jakarta.validation.constraints.Max;
+import jakarta.validation.constraints.Min;
 import java.time.LocalDate;
 import java.util.List;
 import lombok.RequiredArgsConstructor;
+import org.example.moviereservationsystem.dto.PageResponse;
 import org.example.moviereservationsystem.dto.report.MovieRevenue;
 import org.example.moviereservationsystem.dto.report.OccupancyReport;
 import org.example.moviereservationsystem.dto.report.PopularMovie;
@@ -10,6 +13,7 @@ import org.example.moviereservationsystem.dto.report.RevenueReport;
 import org.example.moviereservationsystem.service.ReportService;
 import org.springframework.format.annotation.DateTimeFormat;
 import org.springframework.http.ResponseEntity;
+import org.springframework.validation.annotation.Validated;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
@@ -25,6 +29,7 @@ import org.springframework.web.bind.annotation.RestController;
 @RestController
 @RequestMapping("/api/admin/reports")
 @RequiredArgsConstructor
+@Validated
 public class AdminReportController {
 
     private final ReportService reportService;
@@ -49,10 +54,11 @@ public class AdminReportController {
     }
 
     @GetMapping("/popular-movies")
-    public ResponseEntity<List<PopularMovie>> popularMovies(
+    public ResponseEntity<PageResponse<PopularMovie>> popularMovies(
             @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate from,
             @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate to,
-            @RequestParam(defaultValue = "10") int limit) {
-        return ResponseEntity.ok(reportService.popularMovies(from, to, limit));
+            @RequestParam(defaultValue = "0") @Min(0) int page,
+            @RequestParam(defaultValue = "10") @Min(1) @Max(PageResponse.MAX_PAGE_SIZE) int size) {
+        return ResponseEntity.ok(reportService.popularMovies(from, to, page, size));
     }
 }

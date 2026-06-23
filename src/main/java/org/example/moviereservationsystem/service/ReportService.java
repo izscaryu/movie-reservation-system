@@ -6,6 +6,7 @@ import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.util.List;
 import lombok.RequiredArgsConstructor;
+import org.example.moviereservationsystem.dto.PageResponse;
 import org.example.moviereservationsystem.dto.report.MovieRevenue;
 import org.example.moviereservationsystem.dto.report.OccupancyReport;
 import org.example.moviereservationsystem.dto.report.PopularMovie;
@@ -19,6 +20,7 @@ import org.example.moviereservationsystem.repository.ReservationRepository;
 import org.example.moviereservationsystem.repository.ReservationSeatRepository;
 import org.example.moviereservationsystem.repository.ShowtimeRepository;
 import org.example.moviereservationsystem.repository.ShowtimeSeatRepository;
+import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -43,8 +45,6 @@ public class ReportService {
     private final ReservationSeatRepository reservationSeatRepository;
     private final ShowtimeSeatRepository showtimeSeatRepository;
     private final ShowtimeRepository showtimeRepository;
-
-    private static final int MAX_POPULAR_LIMIT = 100;
 
     @Transactional(readOnly = true)
     public RevenueReport revenue(LocalDate from, LocalDate to) {
@@ -86,15 +86,14 @@ public class ReportService {
     }
 
     @Transactional(readOnly = true)
-    public List<PopularMovie> popularMovies(LocalDate from, LocalDate to, int limit) {
+    public PageResponse<PopularMovie> popularMovies(LocalDate from, LocalDate to, int page, int size) {
         validateRange(from, to);
-        if (limit < 1) {
-            throw new BadRequestException("'limit' must be at least 1");
-        }
-        int capped = Math.min(limit, MAX_POPULAR_LIMIT);
-        return reservationSeatRepository.popularMovies(
+        // page/size bounds (size >= 1, <= MAX_PAGE_SIZE) are enforced at the
+        // controller via @Validated, so no extra limit check is needed here.
+        Page<PopularMovie> result = reservationSeatRepository.popularMovies(
                 ReservationStatus.CONFIRMED, startOfDay(from), startOfDayAfter(to),
-                PageRequest.of(0, capped));
+                PageRequest.of(page, size));
+        return PageResponse.from(result);
     }
 
     // --- helpers ---

@@ -8,6 +8,8 @@ import java.util.Optional;
 import org.example.moviereservationsystem.dto.report.MovieRevenue;
 import org.example.moviereservationsystem.entity.Reservation;
 import org.example.moviereservationsystem.entity.ReservationStatus;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
@@ -19,11 +21,27 @@ public interface ReservationRepository extends JpaRepository<Reservation, Long> 
     // empty -> 404 (we never reveal that someone else's id exists).
     Optional<Reservation> findByIdAndUserId(Long id, Long userId);
 
-    // A caller's reservations with showtime + movie fetched (no N+1 when mapping;
-    // seats are loaded separately to avoid fetching two collections at once).
-    @Query("SELECT r FROM Reservation r JOIN FETCH r.showtime s JOIN FETCH s.movie "
-            + "WHERE r.user.id = :userId ORDER BY r.createdAt DESC")
-    List<Reservation> findByUserIdWithShowtime(@Param("userId") Long userId);
+    // A page of the caller's reservations with showtime + movie fetched (no N+1
+    // when mapping; seats are loaded separately to avoid fetching two collections
+    // at once). Pageable is safe here: only @ManyToOne associations are fetch-
+    // joined (no to-many fetch), so this paginates in the database, not in memory.
+    // The optional after/before bounds implement the upcoming/past filter at the
+    // DB level so paging counts the filtered set. Explicit countQuery (the main
+    // query fetch-joins). (createdAt, id) order for a deterministic page boundary.
+    @Query(value = "SELECT r FROM Reservation r JOIN FETCH r.showtime s JOIN FETCH s.movie "
+            + "WHERE r.user.id = :userId "
+            + "AND (:after IS NULL OR s.startTime > :after) "
+            + "AND (:before IS NULL OR s.startTime <= :before) "
+            + "ORDER BY r.createdAt DESC, r.id DESC",
+            countQuery = "SELECT COUNT(r) FROM Reservation r JOIN r.showtime s "
+            + "WHERE r.user.id = :userId "
+            + "AND (:after IS NULL OR s.startTime > :after) "
+            + "AND (:before IS NULL OR s.startTime <= :before)")
+    Page<Reservation> findByUserIdWithShowtime(
+            @Param("userId") Long userId,
+            @Param("after") LocalDateTime after,
+            @Param("before") LocalDateTime before,
+            Pageable pageable);
 
     // Ids of PENDING holds whose deadline has passed — the expiry job's worklist.
     // Hits idx_reservations_status_expires (status, expires_at).

@@ -87,7 +87,7 @@ class ReportIntegrationTest extends AbstractIntegrationTest {
         holdAndConfirm(user, deletedShowtime, availableSeatIds(deletedShowtime, 2)); // 2 tickets
         softDeleteMovie(admin, deleted);
 
-        JsonNode popular = getJson(admin, "/api/admin/reports/popular-movies?limit=100");
+        JsonNode popular = getJson(admin, "/api/admin/reports/popular-movies?size=100").get("content");
         // Relative ordering of OUR movies (owned): more tickets ranks higher.
         assertThat(indexOfMovie(popular, high)).isLessThan(indexOfMovie(popular, low));
         // Soft-deleted movie is EXCLUDED from the "promote now" list.
@@ -96,6 +96,35 @@ class ReportIntegrationTest extends AbstractIntegrationTest {
         // ...but its revenue is still counted (the money was real).
         JsonNode byMovie = getJson(admin, "/api/admin/reports/revenue/by-movie");
         assertThat(movieRevenue(byMovie, deleted)).isEqualTo(20.0); // 2 x 10.00
+    }
+
+    @Test
+    void popularMovies_isPaginated() throws Exception {
+        String admin = adminToken();
+        String user = userToken();
+        // Five movies with strictly descending ticket counts 5..1.
+        for (int tickets = 5; tickets >= 1; tickets--) {
+            long movieId = createMovie(admin, 120);
+            long showtimeId = newShowtime(admin, movieId, new BigDecimal("10.00"));
+            holdAndConfirm(user, showtimeId, availableSeatIds(showtimeId, tickets));
+        }
+
+        JsonNode page0 = getJson(admin, "/api/admin/reports/popular-movies?page=0&size=2");
+        assertThat(page0.get("totalElements").asLong()).isEqualTo(5);
+        assertThat(page0.get("totalPages").asInt()).isEqualTo(3);
+        assertThat(page0.get("content")).hasSize(2);
+        // Highest ticket count first.
+        assertThat(page0.get("content").get(0).get("ticketsSold").asLong()).isEqualTo(5);
+        assertThat(page0.get("content").get(1).get("ticketsSold").asLong()).isEqualTo(4);
+
+        JsonNode page1 = getJson(admin, "/api/admin/reports/popular-movies?page=1&size=2");
+        // Order holds across the boundary: page 1 starts no higher than page 0 ended.
+        assertThat(page1.get("content").get(0).get("ticketsSold").asLong())
+                .isLessThanOrEqualTo(page0.get("content").get(1).get("ticketsSold").asLong());
+
+        JsonNode page2 = getJson(admin, "/api/admin/reports/popular-movies?page=2&size=2");
+        assertThat(page2.get("content")).hasSize(1);
+        assertThat(page2.get("last").asBoolean()).isTrue();
     }
 
     @Test
@@ -110,7 +139,7 @@ class ReportIntegrationTest extends AbstractIntegrationTest {
         assertThat(revenue.get("confirmedReservations").asLong()).isEqualTo(0);
 
         assertThat(getJson(admin, "/api/admin/reports/revenue/by-movie?" + window)).isEmpty();
-        assertThat(getJson(admin, "/api/admin/reports/popular-movies?" + window)).isEmpty();
+        assertThat(getJson(admin, "/api/admin/reports/popular-movies?" + window).get("content")).isEmpty();
     }
 
     @Test
@@ -120,8 +149,8 @@ class ReportIntegrationTest extends AbstractIntegrationTest {
         mockMvc.perform(get("/api/admin/reports/revenue?from=2026-06-22&to=2026-06-01")
                         .header("Authorization", "Bearer " + admin))
                 .andExpect(status().isBadRequest());
-        // limit below 1.
-        mockMvc.perform(get("/api/admin/reports/popular-movies?limit=0")
+        // page size below 1.
+        mockMvc.perform(get("/api/admin/reports/popular-movies?size=0")
                         .header("Authorization", "Bearer " + admin))
                 .andExpect(status().isBadRequest());
     }

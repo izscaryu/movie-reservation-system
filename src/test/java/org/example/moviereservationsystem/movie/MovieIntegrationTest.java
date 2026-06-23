@@ -56,7 +56,7 @@ class MovieIntegrationTest extends AbstractIntegrationTest {
 
         JsonNode list = read(mockMvc.perform(get("/api/movies").param("genre", action))
                 .andExpect(status().isOk())
-                .andReturn());
+                .andReturn()).get("content");
 
         // Exactly the one movie matches this unique genre.
         assertThat(list.isArray()).isTrue();
@@ -78,7 +78,7 @@ class MovieIntegrationTest extends AbstractIntegrationTest {
         // Filtering by any casing returns both movies -> same genre row reused.
         JsonNode list = read(mockMvc.perform(get("/api/movies").param("genre", shared.toLowerCase()))
                 .andExpect(status().isOk())
-                .andReturn());
+                .andReturn()).get("content");
         assertThat(list).hasSize(2);
         // Both expose the original stored casing, proving no duplicate insert.
         assertThat(genres(list.get(0))).containsExactly(shared);
@@ -122,7 +122,7 @@ class MovieIntegrationTest extends AbstractIntegrationTest {
         mockMvc.perform(get("/api/movies/" + id)).andExpect(status().isNotFound());
         JsonNode list = read(mockMvc.perform(get("/api/movies").param("genre", genre))
                 .andExpect(status().isOk())
-                .andReturn());
+                .andReturn()).get("content");
         assertThat(list).isEmpty();
 
         // Re-delete and update on an already soft-deleted movie -> 404.

@@ -1,8 +1,10 @@
 package org.example.moviereservationsystem.controller;
 
 import jakarta.validation.Valid;
-import java.util.List;
+import jakarta.validation.constraints.Max;
+import jakarta.validation.constraints.Min;
 import lombok.RequiredArgsConstructor;
+import org.example.moviereservationsystem.dto.PageResponse;
 import org.example.moviereservationsystem.dto.reservation.ReservationRequest;
 import org.example.moviereservationsystem.dto.reservation.ReservationResponse;
 import org.example.moviereservationsystem.security.UserPrincipal;
@@ -10,6 +12,7 @@ import org.example.moviereservationsystem.service.ReservationService;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
+import org.springframework.validation.annotation.Validated;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -28,6 +31,7 @@ import org.springframework.web.bind.annotation.RestController;
 @RestController
 @RequestMapping("/api/reservations")
 @RequiredArgsConstructor
+@Validated
 public class ReservationController {
 
     private final ReservationService reservationService;
@@ -47,10 +51,12 @@ public class ReservationController {
     }
 
     @GetMapping("/me")
-    public ResponseEntity<List<ReservationResponse>> mine(
+    public ResponseEntity<PageResponse<ReservationResponse>> mine(
             @RequestParam(required = false) String filter,
+            @RequestParam(defaultValue = "0") @Min(0) int page,
+            @RequestParam(defaultValue = "20") @Min(1) @Max(PageResponse.MAX_PAGE_SIZE) int size,
             @AuthenticationPrincipal UserPrincipal principal) {
-        return ResponseEntity.ok(reservationService.listMine(principal.getId(), filter));
+        return ResponseEntity.ok(reservationService.listMine(principal.getId(), filter, page, size));
     }
 
     @DeleteMapping("/{id}")
