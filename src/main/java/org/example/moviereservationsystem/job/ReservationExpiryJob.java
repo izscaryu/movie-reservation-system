@@ -31,6 +31,7 @@ public class ReservationExpiryJob {
     /** Runs one expiry sweep. Returns the count expired. */
     public int runOnce() {
         List<Long> overdue = reservationService.findOverdueHoldIds();
+        log.debug("Expiry sweep: {} overdue hold(s) found", overdue.size());
         int expired = 0;
         for (Long id : overdue) {
             try {

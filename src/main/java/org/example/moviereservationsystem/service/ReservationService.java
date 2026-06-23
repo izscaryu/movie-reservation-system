@@ -9,6 +9,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.example.moviereservationsystem.dto.PageResponse;
 import org.example.moviereservationsystem.dto.reservation.ReservationRequest;
 import org.example.moviereservationsystem.dto.reservation.ReservationResponse;
@@ -35,6 +36,7 @@ import org.springframework.transaction.annotation.Transactional;
 
 @Service
 @RequiredArgsConstructor
+@Slf4j
 public class ReservationService {
 
     private final ReservationRepository reservationRepository;
@@ -91,6 +93,8 @@ public class ReservationService {
                 .sorted()
                 .toList();
         if (!unavailable.isEmpty()) {
+            log.warn("Seat-lock conflict on showtime {} for user {}: seats already taken {}",
+                    showtime.getId(), userId, unavailable);
             throw new SeatsUnavailableException("Seats not available: " + String.join(", ", unavailable));
         }
 
@@ -110,6 +114,8 @@ public class ReservationService {
             // UPDATE matched 0 rows. flush() throws the native JPA exception (not
             // Spring's translated type), so we catch it here and report a clean
             // 409 instead of letting it surface as a 500.
+            log.warn("Seat-lock conflict (optimistic) on showtime {} for user {}: lost the race",
+                    showtime.getId(), userId);
             throw new SeatsUnavailableException(
                     "One or more seats were just taken; please refresh and retry");
         }
@@ -130,6 +136,8 @@ public class ReservationService {
         // violation there (the defence-in-depth backstop the optimistic lock should
         // already prevent) is translated by Spring to DataIntegrityViolationException
         // and mapped to 409 by the handler.
+        log.info("Reservation {} created (PENDING): user={}, showtime={}, seats={}, expiresAt={}",
+                reservation.getId(), userId, showtime.getId(), seats.size(), reservation.getExpiresAt());
         return ReservationResponse.of(reservation, links);
     }
 
