@@ -13,7 +13,7 @@ Spec: `movie-reservation-system-guide.md`.
 | 5 | Reservation Flow (core) | ✅ Done |
 | 6 | Admin Reporting | ✅ Done |
 | 7 | Polish & Cross-Cutting Concerns | ✅ Done |
-| 8 | Testing | ⬜ Not started |
+| 8 | Testing | ✅ Done |
 | 9 | Containerization & Documentation | ⬜ Not started |
 
 ## Phase 0 — notes / decisions
@@ -406,3 +406,83 @@ Spec: `movie-reservation-system-guide.md`.
   admin-reservations, and OpenAPI coverage). New test classes: `ErrorHandlingIntegrationTest`,
   `MoviePaginationTest`, `AdminReservationIntegrationTest`, `OpenApiIntegrationTest`, and the shared
   `AbstractIntegrationTest` base.
+
+## Phase 8 — notes / decisions
+
+- **Scope reconciliation (most of the spec's Phase 8 list was already built per-phase).**
+  Integration tests + Testcontainers (spec item 2), the concurrency test (item 3) and the
+  expiry-job test (item 4) all landed in earlier phases. The actual gap was **spec item 1**:
+  there was **no JUnit 5 + Mockito unit-test layer** — every existing test booted the full
+  Spring context against real MySQL. Phase 8 adds fast, isolated **service-layer unit tests**
+  for the business logic that was only exercised end-to-end. **No new dependencies** —
+  `spring-boot-starter-test` already brings JUnit 5, Mockito, mockito-junit-jupiter and AssertJ.
+- **The unit/integration split (the headline decision).** Unit tests (`@ExtendWith(MockitoExtension)`,
+  no Spring context, no DB, strict stubs) target the **branching** that is tedious/slow to drive
+  through the full stack — every illegal state transition, every validation/ownership guard, the
+  price snapshot, pure arithmetic and the pure date logic. They assert the service's **reaction**
+  to a mocked repository result (returned DTO / thrown exception), never a value a mock merely
+  echoes back. Integration tests keep proving everything that depends on real DB behaviour
+  (queries, transactions, FK/UNIQUE constraints, optimistic locking, the seat-map generation).
+- **Concurrency STAYS integration — encoded as a guardrail, not just a convention.** The
+  overbooking guarantee lives in DB behaviours a Mockito mock cannot reproduce: the `@Version`
+  optimistic lock on `showtime_seats`, the flush-ordering deadlock fix, and the
+  `compareAndSetStatus` rows-affected serialization. A "concurrency unit test" with mocked repos
+  would prove nothing and give **false confidence**, so it is deliberately absent. A guardrail
+  comment at the top of `ReservationServiceTest` records *why*, so nobody adds one later. The one
+  unit test that touches optimistic locking (`optimisticLockException_isTranslatedTo409`) is a
+  **translation test** — it pins "native `jakarta.persistence.OptimisticLockException` caught at
+  flush → `SeatsUnavailableException` (409, not 500)", which is pure catch-block branching — and
+  explicitly does **not** claim to detect a race.
+- **New unit-test classes (27 tests):**
+  - `ReservationServiceTest` (16) — the crown jewel. hold guards (unknown showtime / soft-deleted
+    movie's showtime → 404, started showtime → 409, unknown/cross-showtime seat id → 400,
+    unavailable seat → 409 with offending labels listed **sorted**, seat-id dedup), hold success
+    (PENDING, **price snapshot** price×seats, `expiresAt = now + hold-minutes`, seats → HELD),
+    confirm (ownership 404 / guarded PENDING→CONFIRMED claiming 0 rows → 409), cancel (ownership
+    404, after-start guard 409, non-cancellable state 409, and the **CONFIRMED→CANCELLED** path +
+    seat release the integration suite does not cover), `expireOne` (expire+release vs the
+    **idempotent no-op** when already non-PENDING), and the optimistic-lock translation test above.
+  - `ReportServiceTest` (4) — **only the pure-Java occupancy-rate computation**: percentage, 2-dp
+    HALF_UP rounding (2/3 → 66.67), the divide-by-zero guard (0 seats → 0.00), unknown showtime →
+    404. The SUM/COUNT/GROUP BY revenue aggregation stays integration (a mock can't reproduce it).
+  - `ShowtimeServiceTest` (1) — `endTime = startTime + movie.durationMinutes` (pure arithmetic).
+    The overlap check is a DB interval query — stubbed to no-conflict and left to integration.
+  - `MovieServiceTest` (1) — genre dedup by lowercased+trimmed name, skipping null/blank, keeping
+    first-seen casing (five entries collapse to one resolved genre). The get-or-create round-trip
+    stays integration.
+  - `DateRangesTest` (5) — pure: inverted range → 400; ascending/equal/open accepted; `startOfDay`
+    inclusive lower bound; `startOfDayAfter` makes the inclusive `to` half-open so a single-day
+    range brackets the whole `to` day.
+- **Tested through the public service API only** — private helpers (`resolveGenres`,
+  `occupancyPercent`, the `label`/`releaseSeats` internals) are exercised via the public methods,
+  never called directly. `@Value holdMinutes` and the `@PersistenceContext` `EntityManager` (a
+  field, so `@InjectMocks` does not wire it) are set via `ReflectionTestUtils` in `@BeforeEach`.
+- **BigDecimal discipline:** every money/ratio assertion uses `isEqualByComparingTo` (never
+  `equals`, which fails on scale — 31.5 vs 31.50, 5 vs 5.00).
+- **Concurrency showcase polished (slice 4, not rewritten).** The existing Phase 5 same-seat race
+  was generalized from a hardcoded 2 threads to a `@ParameterizedTest` over `{2, 8}` with crisp,
+  README-ready assertions: exactly **1** success (201), exactly **threads-1** conflicts (409),
+  **no other status** (a 500 would mean a deadlock/leak), the seat ends HELD by the single winner,
+  and `reservation_seats` holds **exactly one** link for it (no double-book at the data level). It
+  prints a one-line summary per fan-out (`threads=2 → 1×201/1×409`, `threads=8 → 1×201/7×409`).
+  Same CountDownLatch + ExecutorService + `racingHold` structure; stays an integration test on
+  purpose.
+- **Phase 7 carry-overs closed (slice 1).**
+  - **Beyond-last-page:** added `MoviePaginationTest.pageBeyondLast_...` — page 99 of a 3-page
+    result is a well-formed **empty page** with correct `totalElements`/`totalPages`
+    (`first=false`, `last=true`), not an error (MovieService short-circuits the ID query on an
+    empty page).
+  - **Non-whitelisted sort → 400:** already pinned by `AdminReservationIntegrationTest.sort_isWhitelisted`
+    (`?sort=user.password` and a bad direction both 400). `/api/admin/reservations` is the only
+    endpoint taking a client-supplied `sort`; the contract is **reject, not silently ignore**.
+  - **Swagger:** `OpenApiIntegrationTest` already proves the UI loads without a token
+    (`GET /swagger-ui/index.html` → 200) and that `/v3/api-docs` advertises the JWT `bearerAuth`
+    scheme (drives the Authorize button) — no new code needed.
+- **Test execution stays sequential** (the shared Testcontainers MySQL + truncate-all model from
+  Phase 7 assumes it; `junit-platform.properties` pins parallelism off). The new unit tests need
+  no container and run in milliseconds.
+- **Out of scope (noted, not done):** Clock refactor (expiry tests construct already-overdue
+  reservations / assert the hold window within a tolerance instead), any new test dependency,
+  parallel execution, and the Phase 9 README/Dockerfile work.
+- **Verified:** full suite green — **82 tests, 0 failures** (**27 unit** across the 5 new classes
+  + **55 integration**); `./mvnw clean package` builds the jar.
