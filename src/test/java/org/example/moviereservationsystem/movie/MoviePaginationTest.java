@@ -117,6 +117,27 @@ class MoviePaginationTest extends AbstractIntegrationTest {
         mockMvc.perform(get("/api/movies").param("page", "-1")).andExpect(status().isBadRequest());
     }
 
+    @Test
+    void pageBeyondLast_returnsEmptyContentWithCorrectTotals_notAnError() throws Exception {
+        String admin = adminToken();
+        // 25 movies / size 10 -> 3 pages (indices 0..2).
+        for (int i = 0; i < 25; i++) {
+            createMovie(admin, new MovieBody(
+                    "PgMovie " + String.format("%02d", i), null, null, 100, List.of()));
+        }
+
+        // Asking far past the last page is NOT an error: it's a well-formed empty
+        // page whose totals still describe the full result set (the ID short-circuit
+        // in MovieService returns an empty page rather than an out-of-range query).
+        JsonNode page99 = getPage(null, 99, 10);
+        assertThat(page99.get("content")).isEmpty();
+        assertThat(page99.get("totalElements").asLong()).isEqualTo(25);
+        assertThat(page99.get("totalPages").asInt()).isEqualTo(3);
+        assertThat(page99.get("page").asInt()).isEqualTo(99);
+        assertThat(page99.get("first").asBoolean()).isFalse();
+        assertThat(page99.get("last").asBoolean()).isTrue();
+    }
+
     // --- helpers ---
 
     private JsonNode getPage(String genre, int page, int size) throws Exception {
