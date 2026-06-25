@@ -6,11 +6,12 @@ twice when two people click "reserve A5" in the same millisecond.** That problem
 layered solution proven by a real concurrency test, is the headline of this project (see
 [The overbooking problem](#the-overbooking-problem-the-headline)).
 
-It's a learning / CV project, and honest about its scope: there is **no frontend** (the API
-is exercised via Swagger UI, an IntelliJ `.http` file, or Postman) and **no real payment**
-("confirming" a reservation simulates a completed checkout). Everything else — auth, schema
-migrations, seat locking, the expiry job, reporting, pagination, error handling, and the test
-suite — is built the way a real service would be.
+It's a learning / CV project, and honest about its scope: this is the **backend only** — the
+browser SPA that consumes it is a separate repo, and the API is **CORS- and refresh-token-ready**
+for it (here it's exercised via Swagger UI, an IntelliJ `.http` file, or Postman) — and there is
+**no real payment** ("confirming" a reservation simulates a completed checkout). Everything else —
+auth, schema migrations, seat locking, the expiry job, reporting, pagination, error handling, and
+the test suite — is built the way a real service would be.
 
 ---
 
@@ -21,6 +22,7 @@ suite — is built the way a real service would be.
 - [Architecture](#architecture)
 - [The overbooking problem (the headline)](#the-overbooking-problem-the-headline)
 - [How to run it](#how-to-run-it)
+- [Authentication](#authentication)
 - [API documentation](#api-documentation)
 - [API surface](#api-surface)
 - [Testing](#testing)
@@ -51,8 +53,8 @@ decisions.
 | Framework | **Spring Boot 3.5.15** (Web, Data JPA, Security, Validation, Scheduling) |
 | Database | **MySQL 8.4** |
 | Persistence | **Spring Data JPA / Hibernate**, `ddl-auto=validate` (Hibernate never mutates the schema) |
-| Schema migrations | **Flyway** (`V1`–`V3`; Flyway owns the schema) |
-| Auth | **Spring Security + JWT (JJWT, HS256)**, stateless, BCrypt password hashing |
+| Schema migrations | **Flyway** (`V1`–`V4`; Flyway owns the schema) |
+| Auth | **Spring Security + JWT (JJWT, HS256)**, stateless, BCrypt password hashing; short-lived access token + **rotating refresh tokens** with reuse detection; **CORS** for the browser SPA |
 | API docs | **springdoc-openapi / Swagger UI** |
 | Boilerplate | **Lombok** |
 | Containerization | **Docker** multi-stage build + **Docker Compose** (app + DB, one command) |
@@ -194,7 +196,7 @@ docker compose up --build
 
 `docker compose up` builds the app image (multi-stage: Maven build → slim JRE runtime, run as a
 non-root user) and starts MySQL alongside it. The app waits for MySQL to pass its healthcheck before
-booting, Flyway applies migrations `V1`–`V3` on startup, and `CommandLineRunner`s seed an admin
+booting, Flyway applies migrations `V1`–`V4` on startup, and `CommandLineRunner`s seed an admin
 user plus three theater rooms with their seats (idempotently — only on first boot).
 
 When it's up:
@@ -226,6 +228,66 @@ two is why `docker compose up` "just works" regardless of what's on your host 33
 
 ---
 
+## Authentication
+
+Stateless JWT with role-based access (`USER` / `ADMIN`) and **rotating refresh-token sessions**.
+The access JWT is self-contained (subject = user id, plus email and role); the security filter
+rebuilds the principal straight from the token claims with **no per-request DB lookup**.
+
+- **Access token:** short-lived (**15 min**), sent as `Authorization: Bearer <accessToken>`.
+- **Refresh token:** long-lived (**7 days**), **rotated on every use** — each refresh returns a new
+  refresh token and revokes the old one. An opaque 256-bit `SecureRandom` value; the server stores
+  only its **SHA-256 hash**, never the raw token (SHA-256, not bcrypt — bcrypt's slow KDF is for
+  low-entropy passwords, wrong for a high-entropy random token).
+- **Reuse detection:** replaying an already-rotated (revoked) refresh token is treated as theft and
+  **revokes that user's entire token family**, forcing a fresh login.
+
+### Endpoints
+
+```jsonc
+POST /api/auth/login        { "email", "password" }
+// 200
+{
+  "accessToken": "<jwt>",
+  "token":       "<jwt>",        // DEPRECATED back-compat alias of accessToken (same value)
+  "tokenType":   "Bearer",
+  "expiresInMs": 900000,
+  "refreshToken": "<opaque>"
+}
+
+POST /api/auth/refresh      { "refreshToken": "<opaque>" }
+// 200 → same shape as login (new accessToken + NEW refreshToken; the old one is now revoked)
+
+POST /api/auth/logout       { "refreshToken": "<opaque>" }
+// 204 (idempotent)
+```
+
+`/refresh` and `/logout` are **public** — they authenticate via the refresh token itself, not the
+access token. A bad login is **401**; an unknown / expired / revoked / reused refresh token is
+**401** (`Invalid or expired refresh token`). The `token` field is a deprecated alias kept so the
+pre-refresh-token contract still works — **new clients should read `accessToken`.**
+
+**Recommended SPA flow:** keep `accessToken` in memory and `refreshToken` in persistent storage; on
+a `401` from a protected call, `POST /api/auth/refresh` once, swap in the new pair, and retry — if
+the refresh also `401`s, send the user back to login.
+
+### CORS
+
+Allowed browser origins come from `APP_CORS_ALLOWED_ORIGINS` (CSV; dev default `http://localhost:5173`,
+Vite). CORS is wired **onto the security filter chain**, not just the MVC layer — otherwise the
+security filter would `401` the preflight `OPTIONS` before it reached a controller. `allowCredentials`
+is **false**: auth is a bearer header plus a body-based refresh token, so there are no cookies.
+
+### Production upgrade (deliberate trade-off, not a gap)
+
+The refresh token is delivered in the **response body** and stored by the SPA. This is simple,
+framework-agnostic, and identical from Postman or a browser. The hardened production alternative is
+to deliver the refresh token in an **httpOnly, Secure, SameSite cookie** (immune to XSS token theft),
+which then requires **CSRF protection** and `allowCredentials=true` with an explicit (non-wildcard)
+origin. That's a conscious trade-off for this project's scope, not an oversight.
+
+---
+
 ## API documentation
 
 Interactive docs are generated from the code by **springdoc-openapi**:
@@ -233,9 +295,9 @@ Interactive docs are generated from the code by **springdoc-openapi**:
 - **Swagger UI:** http://localhost:8080/swagger-ui/index.html
 - **OpenAPI spec:** http://localhost:8080/v3/api-docs
 
-To call authenticated endpoints from Swagger UI: `POST /api/auth/login`, copy the returned `token`,
-click the **Authorize** button (top right), and paste it. The UI then sends
-`Authorization: Bearer <token>` on every request. Both the Swagger UI and the spec are public
+To call authenticated endpoints from Swagger UI: `POST /api/auth/login`, copy the returned
+`accessToken`, click the **Authorize** button (top right), and paste it. The UI then sends
+`Authorization: Bearer <accessToken>` on every request. Both the Swagger UI and the spec are public
 (permitted in the security filter chain); everything else follows the access tiers below.
 
 ---
@@ -245,7 +307,9 @@ click the **Authorize** button (top right), and paste it. The UI then sends
 | Method & path | Access | Purpose |
 |---|---|---|
 | `POST /api/auth/signup` | public | Register a `USER` (201, no token returned) |
-| `POST /api/auth/login` | public | Authenticate → JWT |
+| `POST /api/auth/login` | public | Authenticate → access + refresh tokens |
+| `POST /api/auth/refresh` | public | Rotate a refresh token → new access + refresh pair |
+| `POST /api/auth/logout` | public | Revoke a refresh token (204) |
 | `GET /api/movies?genre=` | public | List movies (paginated, optional genre filter) |
 | `GET /api/movies/{id}` | public | Movie detail |
 | `GET /api/movies/{movieId}/showtimes?date=` | public | Showtimes for a movie |
@@ -267,15 +331,16 @@ by the URL — acting on someone else's reservation returns **404** (it doesn't 
 
 ## Testing
 
-**82 tests, 0 failures** — a deliberate split between fast unit tests and realistic integration tests:
+**89 tests, 0 failures** — a deliberate split between fast unit tests and realistic integration tests:
 
 - **27 unit tests** (JUnit 5 + Mockito, no Spring context, no DB) cover service-layer branching:
   every illegal state transition, validation/ownership guard, the price snapshot, and pure
   arithmetic/date logic. They assert the service's *reaction* to a mocked repository result, never a
   value a mock merely echoes back.
-- **55 integration tests** (`@SpringBootTest` + **Testcontainers** spinning up a real throwaway
+- **62 integration tests** (`@SpringBootTest` + **Testcontainers** spinning up a real throwaway
   MySQL 8.4) cover everything that depends on actual database behaviour: queries, transactions,
-  FK/UNIQUE constraints, optimistic locking, and seat-map generation. The suite has no dependency on
+  FK/UNIQUE constraints, optimistic locking, seat-map generation, CORS preflight, and the
+  refresh-token flow (rotation, expiry, reuse detection, logout). The suite has no dependency on
   a local `.env` or a particular host port.
 
 The **concurrency test is a real, passing integration test, not a README claim** — it commits real
@@ -299,12 +364,14 @@ In rough priority order — these are deliberately **out of scope** for this bui
   `created_at` as a documented proxy for the sale instant).
 - **Email notifications** — booking confirmation and a pre-showtime reminder, via Spring Mail + an
   SMTP provider.
-- **Refresh tokens** — the JWT setup issues short-lived access tokens only; refresh tokens would let
-  access tokens be even shorter without forcing frequent re-login.
 - **Rate limiting on auth endpoints** — to blunt brute-force login attempts.
 - **Redis caching** — for hot read paths like showtime/seat availability, to cut DB load.
-- **A SPA frontend** — which would force adding **CORS** configuration (intentionally omitted now,
-  since this is a backend-only API with no browser origin to allow).
+- **httpOnly-cookie refresh tokens** — the hardened alternative to the current body-based refresh
+  (see [Authentication](#authentication)); deferred as a deliberate scope trade-off.
+
+> **Already built (were on this list earlier):** **refresh tokens** with rotation + reuse detection,
+> and **CORS** so a browser SPA can call the API — see [Authentication](#authentication). The SPA
+> frontend that consumes this API lives in a **separate repo**; this backend is ready for it.
 
 ---
 
