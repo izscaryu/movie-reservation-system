@@ -15,8 +15,11 @@ Spec: `movie-reservation-system-guide.md`.
 | 7 | Polish & Cross-Cutting Concerns | ✅ Done |
 | 8 | Testing | ✅ Done |
 | 9 | Containerization & Documentation | ✅ Done |
+| 10 | Frontend Enablement (CORS + Refresh Tokens) | ✅ Done |
 
-**Project complete — all phases 0–9 done.**
+**Backend phases 0–10 done.** Phases 0–9 were the original plan; Phase 10 is a
+follow-on that turns the API into something a browser SPA (a separate repo) can
+consume — CORS plus refresh-token sessions.
 
 ## Phase 0 — notes / decisions
 
@@ -547,3 +550,59 @@ Spec: `movie-reservation-system-guide.md`.
   step and is left for explicit human sign-off — no rebase/squash/force-push/push was performed.
   Standing recommendation: **keep** the per-phase history (it tells the build story); the push itself
   is the human's to run.
+
+## Phase 10 — notes / decisions
+
+- **Scope: make the API consumable by a browser SPA — no new Maven dependency.** Two gaps a browser
+  (unlike Postman) exposes: CORS preflight, and a ~1h access token that can expire mid-booking during
+  the 10-min hold flow. Built in 4 slices; the frontend itself is a **separate repo** (not built here).
+- **CORS on the security chain, not the MVC layer (slice 1).** Added a `CorsConfigurationSource`
+  (origins from `app.cors.allowed-origins` / `APP_CORS_ALLOWED_ORIGINS`, dev default Vite's
+  `http://localhost:5173`; methods GET/POST/PUT/DELETE/OPTIONS; headers Authorization + Content-Type)
+  and wired it via `http.cors(...)`. **THE trap:** configuring CORS only at the MVC layer fails because
+  the security filter runs first and 401s the preflight `OPTIONS` before it reaches a controller — it
+  must be on the chain so Spring Security's `CorsFilter` answers preflight early. `allowCredentials`
+  stays **false**: auth is a bearer header + a body-based refresh token, so there are no cookies (and
+  credentials must never be paired with a wildcard origin — we use neither). Preflight test: allowed
+  origin gets the allow-origin header, disallowed origin does not.
+- **Refresh-token persistence (slice 2, V4).** `refresh_tokens` (user_id FK, token_hash, expires_at,
+  created_at, revoked_at; UNIQUE on token_hash + index on user_id). **Store the HASH, never the raw
+  token:** the raw value is a 256-bit `SecureRandom` string (base64url) given to the client once and
+  kept only there; we look it up by **SHA-256** digest. SHA-256 **not bcrypt** — bcrypt is a deliberately
+  slow KDF for *low-entropy passwords*; for a high-entropy random token it's both unnecessary and a
+  per-refresh CPU cost, so a fast hash is correct. `RefreshToken` entity + repo match the schema
+  (ddl-auto=validate verified).
+- **Auth flow: issue / refresh / logout (slice 3).**
+  - **Access token shortened to ~15m** (`JWT_ACCESS_EXPIRATION_MS`, default 900000); the
+    rebuild-`UserPrincipal`-from-claims **stateless filter is unchanged**. Bonus (noted, not a redesign):
+    a promoted user now picks up their new role within 15m via the next access token, instead of the
+    old 1h. Refresh-token lifetime is `JWT_REFRESH_EXPIRATION_MS` (default 7 days).
+  - **Login response shape** is now `{ accessToken, token, tokenType:"Bearer", expiresInMs, refreshToken }`.
+    `token` is a **back-compat alias** of `accessToken` (same value) so the pre-Phase-10 contract keeps
+    working; new clients read `accessToken`. The hashed refresh token is persisted on login.
+  - **`POST /api/auth/refresh`** (public — authenticates via the refresh token itself, already under the
+    `/api/auth/**` permitAll tier, so no security change): validate exists-by-hash / not-expired /
+    not-revoked, then **ROTATE** — revoke the presented token and issue a new access+refresh pair (same
+    shape as login). Invalid/expired/revoked → **401** via `InvalidRefreshTokenException`.
+  - **Reuse detection (the security flourish).** Presenting an **already-revoked** token = a spent token
+    replayed = treated as theft → revoke **all** of that user's active tokens (`revokeAllActiveForUser`,
+    one statement) forcing a full re-login. **THE subtlety:** that family-revoke is a *write* immediately
+    followed by a 401-signalling *throw*; a normal `@Transactional` would roll the write back with the
+    exception. So `refresh()` is `@Transactional(noRollbackFor = InvalidRefreshTokenException.class)` —
+    the security write commits while the 401 still surfaces. (The unknown/expired 401 paths do no writes,
+    so committing their empty tx is harmless.) A test proves it: after replaying a rotated token, the
+    *new* token is dead too.
+  - **`POST /api/auth/logout`** (public): revokes the presented refresh token; idempotent → **204**.
+- **Body-based refresh vs httpOnly-cookie (the trade-off, documented).** Chosen: refresh token in the
+  **JSON body / response**, stored by the SPA (e.g. memory + storage). Simpler, framework-agnostic, no
+  cookie/CSRF machinery, and works identically from Postman and a browser. The **production upgrade**
+  would be an **httpOnly, Secure, SameSite cookie** for the refresh token (immune to XSS token theft),
+  which then **requires CSRF protection** and `allowCredentials=true` with an explicit (non-wildcard)
+  origin. Deliberately **not built** — noted as the prod hardening path.
+- **Out of scope (noted, not built):** the httpOnly-cookie refresh variant, CSRF tokens (unneeded
+  without cookies), the frontend repo itself, and any realtime/websocket seat updates.
+- **Verified:** full suite green — **89 tests, 0 failures** (82 + 2 CORS preflight + 5 new
+  auth/refresh: login shape, refresh rotation, expired→401, rotated-reuse→401+family-revoked,
+  logout→401). New env vars (`APP_CORS_ALLOWED_ORIGINS`, `JWT_ACCESS_EXPIRATION_MS`,
+  `JWT_REFRESH_EXPIRATION_MS`) have dev defaults in application.yml + entries in .env.example +
+  docker-compose.yml. **(README not yet updated for Phase 10 — flagged at the STOP.)**
