@@ -1,3 +1,7 @@
+# Full-stack stack: `docker compose up` builds the app image and runs it
+# against a MySQL container — no local Java, Maven, or MySQL install needed,
+# and no .env file required (every value below has a built-in default that
+# can be overridden via the environment or a .env file).
 services:
   mysql:
     image: mysql:8.4
@@ -9,7 +13,11 @@ services:
       MYSQL_PASSWORD: ${DB_PASSWORD:-moviepass}
       MYSQL_ROOT_PASSWORD: ${DB_ROOT_PASSWORD:-rootpass}
     ports:
-      - "${DB_PORT:-3306}:3306"
+      # Host publish for local IDE dev only (connect a DB client / a host-run
+      # app to localhost:3307). Defaults to 3307 because host 3306 is often
+      # taken by a native MySQL install. This mapping is IRRELEVANT to the
+      # app container, which reaches MySQL over the compose network on 3306.
+      - "${DB_HOST_PORT:-3307}:3306"
     volumes:
       - mysql_data:/var/lib/mysql
     healthcheck:
@@ -18,6 +26,43 @@ services:
       timeout: 5s
       retries: 5
       start_period: 30s
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: movie-reservation-system:latest
+    container_name: movie-reservation-app
+    restart: unless-stopped
+    depends_on:
+      mysql:
+        # Wait for MySQL to pass its healthcheck before booting the app, so
+        # Flyway never races an unready database. This is exactly what the
+        # Phase 0 healthcheck was added for.
+        condition: service_healthy
+    environment:
+      # DB_HOST/DB_PORT are HARD-CODED to the compose service, NOT taken from
+      # the environment. They must not inherit a local .env's DB_HOST=localhost
+      # / DB_PORT=3307 (those describe a host-run app talking to the published
+      # port); inside the network the app talks to service `mysql` on 3306.
+      DB_HOST: mysql
+      DB_PORT: "3306"
+      # Credentials/name DO track the environment so they stay in sync with the
+      # mysql service above (same defaults), overridable in one place.
+      DB_NAME: ${DB_NAME:-movie_reservation}
+      DB_USERNAME: ${DB_USERNAME:-movieuser}
+      DB_PASSWORD: ${DB_PASSWORD:-moviepass}
+      # Seed admin (created idempotently on first boot, hashed at runtime).
+      ADMIN_EMAIL: ${ADMIN_EMAIL:-admin@example.com}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-admin123}
+      ADMIN_NAME: ${ADMIN_NAME:-Administrator}
+      # JWT signing key. This default is DEV-ONLY and INSECURE — override
+      # JWT_SECRET for any real deployment (>= 32 bytes for HS256).
+      JWT_SECRET: ${JWT_SECRET:-dev-only-insecure-secret-change-me-0123456789-abcdefghijklmnop}
+      JWT_EXPIRATION_MS: ${JWT_EXPIRATION_MS:-3600000}
+      SERVER_PORT: "8080"
+    ports:
+      - "${APP_PORT:-8080}:8080"
 
 volumes:
   mysql_data:
