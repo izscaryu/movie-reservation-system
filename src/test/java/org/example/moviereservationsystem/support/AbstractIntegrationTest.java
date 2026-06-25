@@ -86,6 +86,7 @@ public abstract class AbstractIntegrationTest {
      * seeders populate them once at context start.
      */
     private static final List<String> TRANSACTIONAL_TABLES = List.of(
+            "refresh_tokens",
             "reservation_seats",
             "reservations",
             "showtime_seats",
