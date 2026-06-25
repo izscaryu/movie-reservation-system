@@ -19,22 +19,23 @@ import org.springframework.stereotype.Service;
 public class JwtService {
 
     private final SecretKey key;
-    private final long expirationMs;
+    private final long accessExpirationMs;
 
     public JwtService(
             @Value("${app.jwt.secret}") String secret,
-            @Value("${app.jwt.expiration-ms}") long expirationMs) {
+            @Value("${app.jwt.access-expiration-ms}") long accessExpirationMs) {
         this.key = Keys.hmacShaKeyFor(secret.getBytes(StandardCharsets.UTF_8));
-        this.expirationMs = expirationMs;
+        this.accessExpirationMs = accessExpirationMs;
     }
 
-    public long getExpirationMs() {
-        return expirationMs;
+    /** Lifetime of the access token (short — refresh tokens cover longer sessions). */
+    public long getAccessExpirationMs() {
+        return accessExpirationMs;
     }
 
     public String generateToken(UserPrincipal principal) {
         Date now = new Date();
-        Date expiry = new Date(now.getTime() + expirationMs);
+        Date expiry = new Date(now.getTime() + accessExpirationMs);
         return Jwts.builder()
                 .subject(String.valueOf(principal.getId()))
                 .claim("email", principal.getUsername())

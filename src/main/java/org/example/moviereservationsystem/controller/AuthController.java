@@ -5,6 +5,7 @@ import lombok.RequiredArgsConstructor;
 import org.example.moviereservationsystem.dto.UserResponse;
 import org.example.moviereservationsystem.dto.auth.AuthResponse;
 import org.example.moviereservationsystem.dto.auth.LoginRequest;
+import org.example.moviereservationsystem.dto.auth.RefreshTokenRequest;
 import org.example.moviereservationsystem.dto.auth.SignupRequest;
 import org.example.moviereservationsystem.service.AuthService;
 import org.springframework.http.HttpStatus;
@@ -30,5 +31,21 @@ public class AuthController {
     @PostMapping("/login")
     public ResponseEntity<AuthResponse> login(@Valid @RequestBody LoginRequest request) {
         return ResponseEntity.ok(authService.login(request));
+    }
+
+    /**
+     * Rotates a refresh token for a fresh access + refresh pair. Authenticated by
+     * the refresh token in the body (not the access token), so it is public.
+     */
+    @PostMapping("/refresh")
+    public ResponseEntity<AuthResponse> refresh(@Valid @RequestBody RefreshTokenRequest request) {
+        return ResponseEntity.ok(authService.refresh(request));
+    }
+
+    /** Revokes the given refresh token (logout). Idempotent -> 204. */
+    @PostMapping("/logout")
+    public ResponseEntity<Void> logout(@Valid @RequestBody RefreshTokenRequest request) {
+        authService.logout(request);
+        return ResponseEntity.noContent().build();
     }
 }

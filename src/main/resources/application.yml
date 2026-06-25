@@ -44,7 +44,12 @@ app:
     # HS256 signing key. Dev-only default below — MUST be overridden via
     # JWT_SECRET in any real environment. Must be >= 32 bytes for HS256.
     secret: ${JWT_SECRET:dev-only-insecure-secret-change-me-0123456789-abcdefghijklmnop}
-    expiration-ms: ${JWT_EXPIRATION_MS:3600000}
+    # Short-lived ACCESS token (default 15 min). A refresh token (below) keeps the
+    # session alive without re-login. Bonus: a promoted user picks up their new
+    # role within 15 min (next access token) instead of the old 1 h.
+    access-expiration-ms: ${JWT_ACCESS_EXPIRATION_MS:900000}
+    # Refresh-token lifetime (default 7 days). Rotated on every use.
+    refresh-expiration-ms: ${JWT_REFRESH_EXPIRATION_MS:604800000}
   cors:
     # Comma-separated origins allowed to call the API from a browser. Dev default
     # is Vite's port; a Create-React-App SPA would be http://localhost:3000.
