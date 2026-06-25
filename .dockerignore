@@ -1,0 +1,25 @@
+# Keep the build context small and keep secrets / IDE cruft out of the image.
+# Anything here is invisible to `docker build` (the build never sees it).
+
+# Build output (the image builds its own target/ in the build stage)
+target/
+
+# Git metadata
+.git
+.gitignore
+.gitattributes
+
+# Secrets / local env (compose injects real values; never bake them in)
+.env
+*.local
+**/http-client.private.env.json
+
+# IDE / editor cruft
+.idea/
+*.iml
+*.iws
+*.ipr
+.vscode/
+
+# Logs and scratch
+*.log
