@@ -14,7 +14,9 @@ Spec: `movie-reservation-system-guide.md`.
 | 6 | Admin Reporting | ✅ Done |
 | 7 | Polish & Cross-Cutting Concerns | ✅ Done |
 | 8 | Testing | ✅ Done |
-| 9 | Containerization & Documentation | ⬜ Not started |
+| 9 | Containerization & Documentation | ✅ Done |
+
+**Project complete — all phases 0–9 done.**
 
 ## Phase 0 — notes / decisions
 
@@ -486,3 +488,62 @@ Spec: `movie-reservation-system-guide.md`.
   parallel execution, and the Phase 9 README/Dockerfile work.
 - **Verified:** full suite green — **82 tests, 0 failures** (**27 unit** across the 5 new classes
   + **55 integration**); `./mvnw clean package` builds the jar.
+
+## Phase 9 — notes / decisions
+
+- **Scope: containerization + documentation only — no new domain logic, no new dependency.** The
+  image and compose stack use only what the app already needs (the optional actuator-based app
+  healthcheck was deliberately **skipped** — the MySQL healthcheck gating app startup is the one
+  that matters).
+- **Multi-stage Dockerfile (slice 1).** Build stage on `eclipse-temurin:21-jdk` using the project's
+  own `./mvnw` wrapper: copy `.mvn/` + `mvnw` + `pom.xml` and `dependency:go-offline` **before**
+  copying `src/`, so a code change reuses the cached dependency layer instead of re-downloading
+  (Docker layer caching). Runtime stage on slim `eclipse-temurin:21-jre` (matches the Java 21
+  source/target, **not** the local JDK 25) running as a **non-root** user (`uid 999`). Tests are
+  skipped in the image build (they need a Docker daemon for Testcontainers, unavailable in the build
+  sandbox). `.dockerignore` keeps `target/`, `.git`, `.env`, IDE files and the private http-client
+  env out of the build context. The wrapper is the modern `only-script` type (downloads Maven 3.9.16
+  at build) and `mvnw` is pinned LF via `.gitattributes`, so no CRLF footgun in the Linux build.
+  **Verified:** image builds; container boots as non-root; Flyway applies V1–V3 against a reachable
+  MySQL 8.4 (proven on a throwaway isolated network, no host-port dependency).
+- **Full-stack compose (slice 2).** Added an `app` service that builds the image and runs against the
+  existing `mysql` service, gated on `depends_on: mysql: condition: service_healthy` (what the Phase 0
+  healthcheck was *for*). `docker compose up` runs the whole project from a clean clone.
+  - **No `.env` required (chosen: option A — inline defaults).** Every value has a built-in
+    `${VAR:-default}`; the committed `.env.example` remains only for local IDE dev.
+  - **THE 3306/3307 resolution (footgun killed for good).** The app service's `DB_HOST`/`DB_PORT` are
+    **hard-coded** to `mysql:3306` (the compose-internal coordinates), deliberately **not** sourced
+    from the environment — otherwise a local `.env`'s `DB_HOST=localhost` / `DB_PORT=3307` (which
+    describe a *host-run* app hitting the published port) would leak into the container and break
+    container-to-container networking. Confirmed the real local `.env` does contain exactly that, so
+    the hard-coding is load-bearing. The host publish is **decoupled** onto a new `DB_HOST_PORT`
+    (default **3307**, dodging the native-3306 conflict) purely for local IDE dev.
+  - **`application.yml` already parameterized the JDBC host** as `${DB_HOST:localhost}` (from Phase 0)
+    — no app change was needed in this phase. Vars confirmed end-to-end:
+    `DB_HOST/DB_PORT/DB_NAME/DB_USERNAME/DB_PASSWORD`.
+  - **`JWT_SECRET`** ships a clearly-labelled insecure dev default, documented as override-for-real-use
+    (not pretended to be production-secret).
+  - **Verified from a clean state** (isolated compose project, `.env` moved aside, throwaway volume so
+    the local dev DB volume was never touched): mysql goes healthy → app boots; Swagger UI +
+    `/v3/api-docs` load; signup → 201; login issues a token; USER → `/api/admin/**` → **403**; seeded
+    admin → **200** and creates a movie → **201**; public `GET /api/movies` → **200**.
+- **README (slice 3, the real deliverable).** Public-CV framing: explains the *decisions* to a
+  reviewer, not just how to run it. Headline section is the overbooking problem and its solution
+  (ShowtimeSeat structural choice + three layers, proven by the parameterized concurrency test).
+  Includes tech stack, layered-architecture + ERD diagrams, one-command run instructions, Swagger/
+  Authorize-button docs, the full API-surface table, the 82-test unit/integration split, and a scoped
+  "what I'd add with more time" (payment, email, refresh tokens, rate limiting, Redis, SPA+CORS — all
+  spec stretch goals, kept in docs not code). Everything stated is true of the actual repo; no
+  invented metrics or features.
+- **Housekeeping (slice 4).** `.gitignore` audit passed: `.env`, `target/`, `*.private.env.json`,
+  `*.iml`, `.idea/`, `*.log`, `autentificationSuccess.txt` all ignored; the only tracked
+  sensitive-looking files are the intended `.env.example` (dev-only defaults) and the **non-secret**
+  `src/http-client.env.json` (base URL + admin email only; the password lives in the gitignored
+  private file). Nothing secret is tracked.
+- **Out of scope (noted, not built):** CORS, a `confirmedAt` column, and the stretch goals
+  (payment/email/refresh-token/rate-limit/Redis/SPA) — all documented in the README's "what I'd add",
+  not implemented.
+- **STOP point:** slice 5 (git-history keep-vs-squash + the first push to a remote) is the irreversible
+  step and is left for explicit human sign-off — no rebase/squash/force-push/push was performed.
+  Standing recommendation: **keep** the per-phase history (it tells the build story); the push itself
+  is the human's to run.
