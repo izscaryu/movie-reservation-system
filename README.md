@@ -242,6 +242,38 @@ rebuilds the principal straight from the token claims with **no per-request DB l
 - **Reuse detection:** replaying an already-rotated (revoked) refresh token is treated as theft and
   **revokes that user's entire token family**, forcing a fresh login.
 
+### Rotation is concurrency-safe (and proven)
+
+Token rotation has the **same shape of race as the seat hold**: a naive *check the token is active,
+then revoke-and-rotate it* leaves a window (a TOCTOU gap) where two concurrent refreshes of the
+**same** token both read it as active and both rotate it — the token gets used twice, minting two
+valid sessions. Rejection that only works when the calls happen to be sequential isn't enough.
+
+The fix is the **same rows-affected idiom** used for the seat race — a single-statement atomic
+compare-and-consume:
+
+```sql
+UPDATE refresh_tokens SET revoked_at = ?
+WHERE token_hash = ? AND revoked_at IS NULL AND expires_at >= ?
+```
+
+Because an `UPDATE ... WHERE` re-evaluates its predicate as a **current read under the row lock**,
+exactly **one** of N concurrent callers matches a row and rotates; the rest match zero rows. A caller
+that read the token as active but lost that race is handled **fail-safe** — treated as reuse, so the
+whole token family is revoked (a deterministic re-login, never a token used twice).
+
+Proven the same way as overbooking — a parameterized integration test fires N concurrent refreshes of
+one token at a real MySQL and asserts exactly **1 × 200**, **N−1 × 401**, no 500, and at the data
+level that the token was consumed **exactly once** (the original + one replacement row, never more):
+
+```
+threads=2 → 1×200 / 1×401
+threads=8 → 1×200 / 7×401
+```
+
+The test has teeth: against the pre-fix read-then-write code it goes red with `8×200` at
+`threads=8` (every concurrent request rotated the one token) — exactly the bug it now prevents.
+
 ### Endpoints
 
 ```jsonc
@@ -331,23 +363,24 @@ by the URL — acting on someone else's reservation returns **404** (it doesn't 
 
 ## Testing
 
-**89 tests, 0 failures** — a deliberate split between fast unit tests and realistic integration tests:
+**91 tests, 0 failures** — a deliberate split between fast unit tests and realistic integration tests:
 
 - **27 unit tests** (JUnit 5 + Mockito, no Spring context, no DB) cover service-layer branching:
   every illegal state transition, validation/ownership guard, the price snapshot, and pure
   arithmetic/date logic. They assert the service's *reaction* to a mocked repository result, never a
   value a mock merely echoes back.
-- **62 integration tests** (`@SpringBootTest` + **Testcontainers** spinning up a real throwaway
+- **64 integration tests** (`@SpringBootTest` + **Testcontainers** spinning up a real throwaway
   MySQL 8.4) cover everything that depends on actual database behaviour: queries, transactions,
   FK/UNIQUE constraints, optimistic locking, seat-map generation, CORS preflight, and the
-  refresh-token flow (rotation, expiry, reuse detection, logout). The suite has no dependency on
-  a local `.env` or a particular host port.
+  refresh-token flow (rotation, expiry, reuse detection, logout, and the rotation TOCTOU
+  concurrency proof). The suite has no dependency on a local `.env` or a particular host port.
 
-The **concurrency test is a real, passing integration test, not a README claim** — it commits real
-transactions on a real MySQL and asserts exactly one winner out of N racing threads (see
-[The proof](#the-proof)). The overbooking guarantee lives in database behaviours a mock cannot
-reproduce, so it stays integration on purpose — a "concurrency unit test" with mocked repositories
-would prove nothing.
+The **concurrency tests are real, passing integration tests, not README claims** — both the
+seat-hold race ([The proof](#the-proof)) and the refresh-token rotation race
+([Rotation is concurrency-safe](#rotation-is-concurrency-safe-and-proven)) commit real transactions
+on a real MySQL and assert exactly one winner out of N racing threads. These guarantees live in
+database behaviours a mock cannot reproduce, so they stay integration on purpose — a "concurrency
+unit test" with mocked repositories would prove nothing.
 
 ```bash
 ./mvnw test          # needs Docker running (Testcontainers starts MySQL)
