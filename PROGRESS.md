@@ -16,10 +16,12 @@ Spec: `movie-reservation-system-guide.md`.
 | 8 | Testing | ✅ Done |
 | 9 | Containerization & Documentation | ✅ Done |
 | 10 | Frontend Enablement (CORS + Refresh Tokens) | ✅ Done |
+| 11 | Refresh-Token Rotation TOCTOU Fix | ✅ Done |
 
-**Backend phases 0–10 done.** Phases 0–9 were the original plan; Phase 10 is a
+**Backend phases 0–11 done.** Phases 0–9 were the original plan; Phase 10 is a
 follow-on that turns the API into something a browser SPA (a separate repo) can
-consume — CORS plus refresh-token sessions.
+consume — CORS plus refresh-token sessions. Phase 11 closes a concurrency race in
+that refresh-token rotation.
 
 ## Phase 0 — notes / decisions
 
@@ -606,3 +608,60 @@ consume — CORS plus refresh-token sessions.
   logout→401). New env vars (`APP_CORS_ALLOWED_ORIGINS`, `JWT_ACCESS_EXPIRATION_MS`,
   `JWT_REFRESH_EXPIRATION_MS`) have dev defaults in application.yml + entries in .env.example +
   docker-compose.yml. **(README not yet updated for Phase 10 — flagged at the STOP.)**
+
+## Phase 11 — notes / decisions
+
+- **Scope: one concurrency bug in the Phase 10 refresh-token rotation — no new DDL, no new
+  dependency, no API/contract change.** A live finding showed reuse-rejection was *sequential
+  only*: a tight concurrent burst of the **same** refresh token could rotate it more than once.
+- **The TOCTOU window (root cause).** `RefreshTokenService.verifyAndConsume` was a read-then-write:
+  (1) `findByTokenHash` — a non-locking consistent `SELECT` (under InnoDB REPEATABLE READ this
+  fixes the txn snapshot); (2) check `isRevoked()`/`isExpired()` against that snapshot; (3)
+  `token.setRevokedAt(now)` → flushed on commit as `UPDATE … SET revoked_at WHERE id=?`,
+  **unconditional on id**. Two concurrent `refresh()` calls both read `revoked_at = NULL` (each
+  before the other commits), both pass the checks — **reuse detection never even fires** because
+  neither sees it revoked — and both run the unconditional UPDATE. InnoDB serializes the two writes
+  on the row X-lock but the second just overwrites, so **both commit and both rotate**: one token
+  consumed twice, two valid new families. Sequentially the 2nd read happens after the 1st commit,
+  sees `revoked_at != NULL`, and *does* reject — which is exactly why the leniency was sequential-only.
+- **THE fix — atomic compare-and-consume (the auth analogue of the Phase 5 seat race).** Mirrors the
+  established `compareAndSetStatus` rows-affected idiom. New repository method
+  `consumeIfActive(hash, now)` = single-statement
+  `UPDATE … SET revoked_at = :now WHERE token_hash = :hash AND revoked_at IS NULL AND expires_at >= :now`.
+  An `UPDATE … WHERE` does a **current read** (latest committed version under the row X-lock), *not*
+  the snapshot read — so the loser re-evaluates `revoked_at IS NULL` against the winner's committed
+  value and matches **0 rows**. Of N concurrent callers, **exactly one** gets `rows == 1` and rotates.
+  - **Restructured `verifyAndConsume`:** the initial `findByTokenHash` is now used **only to classify**
+    (unknown→401 / already-revoked→reuse / expired→401); the atomic `consumeIfActive` is the gate.
+  - **Hibernate write-back trap (avoided):** the bulk UPDATE bypasses the persistence context; the
+    managed `token` is **not** dirtied (we no longer call `setRevokedAt`), so dirty-checking emits no
+    write-back over it on commit. We deliberately do **not** use `clearAutomatically` — that would
+    detach `token` and break the lazy `getUser()` the caller needs to mint the new pair.
+- **Lost-race policy = FAIL-SAFE (deliberate, the security call).** A request that read the token as
+  active but lost the atomic consume is treated as **reuse → revoke the whole family** (same as a
+  replayed already-revoked token), not given a quiet 401. Rationale: rotation exists *for* reuse
+  detection; fail-safe catches even the simultaneous-theft case, it's deterministic, and it's the
+  standard OAuth-rotation behavior. The cost (a rare, recoverable re-login) falls mostly on
+  misbehaving clients — a well-behaved SPA single-flights its refresh. We chose **not** to weaken
+  detection to spare UX on an auth path. Considered and rejected: a "tolerant" variant where the
+  loser gets a bare 401 and the winner's session survives — weaker detection and a
+  non-deterministic survivor count.
+- **Why fail-safe is DETERMINISTIC 0-active (the lock-ordering insight).** The loser's
+  `consumeIfActive` **blocks on the winner's row X-lock until the winner's whole transaction commits
+  — including the new token INSERT**. So by the time the loser runs the family sweep, the winner's
+  fresh token is already committed and visible, and gets revoked too. End state after a burst:
+  original + winner's replacement both revoked → **zero active tokens, full re-login** (not a
+  token-used-twice). `noRollbackFor = InvalidRefreshTokenException` (Phase 10) still applies — it now
+  also covers the lost-race family-revoke write that precedes the 401 throw.
+- **Proof under genuine concurrency (guardrail-compliant — real DB, not mocked).** New
+  `@ParameterizedTest` over `{2, 8}` in `AuthIntegrationTest`: N threads present the **same** refresh
+  token, released together by a `CountDownLatch`, against the real `POST /api/auth/refresh` on
+  Testcontainers MySQL. Asserts exactly **1×200**, **N-1×401**, **no other status** (a 500 = leaked
+  race). The real proof is the **data-level** one: `COUNT(*) … WHERE user_id = ?` **== 2** (original +
+  the single winner's replacement) → consumed **exactly once**, never double-rotated; plus **0 active
+  tokens** (fail-safe family sweep fired). Run output:
+  `threads=2 → 1×200/1×401`, `threads=8 → 1×200/7×401`, with the family-revoke log showing one
+  loser "revoked 1" (the winner's fresh token) and the rest "revoked 0".
+- **Verified:** full suite green — **91 tests, 0 failures** (89 from Phase 10 + the 2 new
+  parameterized invocations); the existing 9 `AuthIntegrationTest` methods (sequential
+  reuse→family-revoke, expired→401, logout→401, login shape, rotation) stay green unchanged.

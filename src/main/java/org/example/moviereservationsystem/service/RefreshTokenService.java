@@ -56,28 +56,54 @@ public class RefreshTokenService {
      * can be rotated for a fresh one. Returns the matched row (its user is needed
      * to mint the new tokens).
      *
-     * <p>Reuse detection: presenting an ALREADY-revoked token means a spent token
-     * was replayed — treated as theft, so every active token in that user's family
-     * is revoked, forcing a full re-login. Unknown / expired / revoked all surface
-     * as a generic 401 ({@link InvalidRefreshTokenException}).
+     * <p>The consume is an atomic compare-and-revoke ({@code consumeIfActive}), not a
+     * read-then-write: of N concurrent callers presenting the same token, exactly one
+     * gets the row and rotates; the rest match 0 rows. This closes the check-to-rotate
+     * TOCTOU window where two concurrent reads could each pass before either revoked.
+     *
+     * <p>Reuse detection (fail-safe). Two ways a token can be presented more than once,
+     * both treated as theft → revoke the whole family, forcing a full re-login:
+     * <ul>
+     *   <li>the row is already revoked at read time — a spent token replayed;
+     *   <li>the row read as active but {@code consumeIfActive} matched 0 rows — a
+     *       concurrent request already rotated it (we lost the race). The blocking
+     *       row-lock means we reach this only after the winner's whole transaction
+     *       committed, so the family sweep also revokes the winner's fresh token →
+     *       deterministic re-login rather than a token used twice.
+     * </ul>
+     * Unknown / expired / revoked / lost-race all surface as a generic 401
+     * ({@link InvalidRefreshTokenException}).
      */
     public RefreshToken verifyAndConsume(String rawToken) {
         LocalDateTime now = LocalDateTime.now();
-        RefreshToken token = refreshTokenRepository.findByTokenHash(hash(rawToken))
+        String hash = hash(rawToken);
+        RefreshToken token = refreshTokenRepository.findByTokenHash(hash)
                 .orElseThrow(InvalidRefreshTokenException::new);
 
         if (token.isRevoked()) {
-            int revoked = refreshTokenRepository.revokeAllActiveForUser(token.getUser().getId(), now);
-            log.warn("Refresh-token reuse detected for user {}; revoked {} active token(s)",
-                    token.getUser().getId(), revoked);
+            revokeFamilyAsReuse(token, now);
             throw new InvalidRefreshTokenException();
         }
         if (token.isExpired(now)) {
-            throw new InvalidRefreshTokenException();
+            throw new InvalidRefreshTokenException(); // no write
         }
 
-        token.setRevokedAt(now); // rotation: this token is now spent
+        // Atomic consume: closes the TOCTOU window. Exactly one concurrent caller wins.
+        // (The bulk UPDATE bypasses the persistence context; `token` is not dirtied, so
+        // Hibernate emits no write-back over it on commit — and we keep it managed, not
+        // cleared, so the lazy getUser() below still resolves.)
+        if (refreshTokenRepository.consumeIfActive(hash, now) == 0) {
+            revokeFamilyAsReuse(token, now); // saw it active but lost the race -> reuse
+            throw new InvalidRefreshTokenException();
+        }
         return token;
+    }
+
+    /** Reuse = theft: nuke every active token in the user's family. */
+    private void revokeFamilyAsReuse(RefreshToken token, LocalDateTime now) {
+        int revoked = refreshTokenRepository.revokeAllActiveForUser(token.getUser().getId(), now);
+        log.warn("Refresh-token reuse detected for user {}; revoked {} active token(s)",
+                token.getUser().getId(), revoked);
     }
 
     /** Logout: revoke the presented token if it exists and is still active. Idempotent. */

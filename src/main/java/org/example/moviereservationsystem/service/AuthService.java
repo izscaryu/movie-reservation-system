@@ -64,11 +64,12 @@ public class AuthService {
      * detection) and issues a fresh access + refresh pair. Invalid/expired/revoked
      * -> 401 via InvalidRefreshTokenException.
      *
-     * <p>noRollbackFor: on reuse detection, verifyAndConsume revokes the whole token
-     * family (a write) and THEN throws to signal 401. Without this, the throw would
-     * roll back that family-revoke. Marking the exception non-rollback lets the
-     * security write commit while still surfacing the 401. The other 401 paths
-     * (unknown/expired) perform no writes, so committing their empty tx is harmless.
+     * <p>noRollbackFor: on reuse detection (a replayed revoked token, OR losing the
+     * atomic consume race), verifyAndConsume revokes the whole token family (a write)
+     * and THEN throws to signal 401. Without this, the throw would roll back that
+     * family-revoke. Marking the exception non-rollback lets the security write commit
+     * while still surfacing the 401. The other 401 paths (unknown/expired) perform no
+     * writes, so committing their empty tx is harmless.
      */
     @Transactional(noRollbackFor = InvalidRefreshTokenException.class)
     public AuthResponse refresh(RefreshTokenRequest request) {

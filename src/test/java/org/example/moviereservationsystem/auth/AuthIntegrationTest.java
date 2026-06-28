@@ -8,9 +8,18 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import com.fasterxml.jackson.databind.JsonNode;
 import java.sql.Timestamp;
 import java.time.LocalDateTime;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.UUID;
+import java.util.concurrent.Callable;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import org.example.moviereservationsystem.support.AbstractIntegrationTest;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.http.MediaType;
 import org.springframework.test.web.servlet.MvcResult;
 import org.springframework.test.web.servlet.ResultActions;
@@ -25,6 +34,7 @@ import org.springframework.test.web.servlet.ResultActions;
  *   6. expired refresh -> 401
  *   7. reusing a rotated (revoked) refresh -> 401 and the whole family is revoked
  *   8. logout then refresh -> 401
+ *   9. N concurrent refreshes of one token -> exactly one rotates (TOCTOU proof)
  */
 class AuthIntegrationTest extends AbstractIntegrationTest {
 
@@ -146,7 +156,83 @@ class AuthIntegrationTest extends AbstractIntegrationTest {
         refresh(refreshToken).andExpect(status().isUnauthorized());
     }
 
+    /**
+     * THE refresh-rotation TOCTOU proof. {@code threads} requests present the SAME
+     * refresh token at the same instant (a {@link CountDownLatch} releases them
+     * together) against the real endpoint and a real MySQL. The window between
+     * "check the token is active" and "revoke + rotate it" is closed by an atomic
+     * compare-and-consume ({@code consumeIfActive}) — the auth analogue of the seat
+     * race's {@code compareAndSetStatus}.
+     *
+     * <p>Crisp assertions: exactly <b>1</b> rotation succeeds (200), exactly
+     * <b>threads-1</b> are rejected (401), <b>no other status</b> (a 500 would mean a
+     * leaked race). The data-level guarantee is the real one — the token is consumed
+     * <b>exactly once</b>, so the user has exactly two rows (the original + the single
+     * winner's replacement), never a token rotated twice. Fail-safe reuse handling
+     * then leaves <b>zero</b> active tokens: a lost-race presentation is treated as
+     * theft, so the family sweep revokes the winner's fresh token too (deterministic
+     * re-login). Parameterized over a small and a larger fan-out.
+     *
+     * <p>Intentionally an integration test against real MySQL: the guarantee lives in
+     * InnoDB row-locking (current-read re-evaluation under the X-lock), not service
+     * branching, so a mocked repository could not reproduce it.
+     */
+    @ParameterizedTest(name = "{0} concurrent refreshes of one token -> 1 success, {0}-1 rejected")
+    @ValueSource(ints = {2, 8})
+    void concurrentRefreshOfSameToken_rotatesExactlyOnce(int threads) throws Exception {
+        String email = uniqueEmail();
+        long userId = signup(email, "password123", "Race User");
+        String refreshToken = loginJson(email, "password123").get("refreshToken").asText();
+
+        ExecutorService pool = Executors.newFixedThreadPool(threads);
+        CountDownLatch start = new CountDownLatch(1);
+        List<Future<Integer>> futures = new ArrayList<>();
+        for (int i = 0; i < threads; i++) {
+            futures.add(pool.submit(racingRefresh(start, refreshToken)));
+        }
+        start.countDown(); // fire them all at once
+
+        List<Integer> statuses = new ArrayList<>();
+        for (Future<Integer> future : futures) {
+            statuses.add(future.get());
+        }
+        pool.shutdown();
+
+        long successes = statuses.stream().filter(s -> s == 200).count();
+        long rejected = statuses.stream().filter(s -> s == 401).count();
+        System.out.printf(
+                "[refresh TOCTOU proof] threads=%d -> 200 x%d, 401 x%d (statuses=%s)%n",
+                threads, successes, rejected, statuses);
+
+        // Exactly one rotation wins; everyone else a clean 401; nothing else (no 500).
+        assertThat(successes).isEqualTo(1);
+        assertThat(rejected).isEqualTo(threads - 1L);
+        assertThat(statuses).allMatch(s -> s == 200 || s == 401);
+
+        // Consumed EXACTLY once: original + the single winner's replacement = 2 rows.
+        // (A double-rotation would leave 3+.) This is what actually proves the fix,
+        // not the response codes.
+        Integer total = jdbcTemplate.queryForObject(
+                "SELECT COUNT(*) FROM refresh_tokens WHERE user_id = ?", Integer.class, userId);
+        assertThat(total).isEqualTo(2);
+
+        // Fail-safe: a lost-race presentation is reuse, so the family sweep revokes the
+        // winner's fresh token too -> no active tokens remain, the user must re-login.
+        Integer active = jdbcTemplate.queryForObject(
+                "SELECT COUNT(*) FROM refresh_tokens WHERE user_id = ? "
+                        + "AND revoked_at IS NULL AND expires_at > ?",
+                Integer.class, userId, Timestamp.valueOf(LocalDateTime.now()));
+        assertThat(active).isZero();
+    }
+
     // --- helpers ---
+
+    private Callable<Integer> racingRefresh(CountDownLatch start, String refreshToken) {
+        return () -> {
+            start.await();
+            return refresh(refreshToken).andReturn().getResponse().getStatus();
+        };
+    }
 
     private JsonNode loginJson(String email, String password) throws Exception {
         MvcResult result = mockMvc.perform(post("/api/auth/login")
